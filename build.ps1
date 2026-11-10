@@ -29,6 +29,7 @@ Push-Location -LiteralPath $build
 try {
     @(
         '1 24 "../ComputerWatch.manifest"'
+        '1 ICON "../ComputerWatch.ico"'
         '101 RCDATA "IntelMSR.bin"'
     ) | Set-Content -LiteralPath 'resources.rc' -Encoding Ascii
     & $resourceCompiler -i resources.rc -o resources.o -O coff

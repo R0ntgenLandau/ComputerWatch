@@ -21,6 +21,7 @@ namespace cw {
 namespace {
 
 constexpr wchar_t WindowClass[] = L"ComputerWatchDashboard";
+constexpr WORD ApplicationIcon = 1;
 constexpr UINT ShowMessage = WM_APP + 1;
 constexpr UINT TrayMessage = WM_APP + 2;
 constexpr UINT ButtonMessage = WM_APP + 3;
@@ -234,7 +235,11 @@ public:
         windowClass.cbSize = sizeof(windowClass);
         windowClass.lpfnWndProc = windowProc;
         windowClass.hInstance = instance_;
-        windowClass.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+        windowClass.hIcon = LoadIconW(instance_, MAKEINTRESOURCEW(ApplicationIcon));
+        windowClass.hIconSm = static_cast<HICON>(LoadImageW(instance_, MAKEINTRESOURCEW(ApplicationIcon),
+            IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_SHARED));
+        appIcon_ = windowClass.hIcon;
+        trayIcon_ = windowClass.hIconSm ? windowClass.hIconSm : appIcon_;
         windowClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         windowClass.lpszClassName = WindowClass;
         if (!RegisterClassExW(&windowClass)) {
@@ -723,7 +728,7 @@ private:
         tray_.uID = 1;
         tray_.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP | NIF_SHOWTIP;
         tray_.uCallbackMessage = TrayMessage;
-        tray_.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+        tray_.hIcon = trayIcon_;
         lstrcpynW(tray_.szTip, L"Computer Watch · 电脑监控", static_cast<int>(std::size(tray_.szTip)));
         trayAdded_ = Shell_NotifyIconW(NIM_ADD, &tray_) != FALSE;
         trayV4_ = false;
@@ -1699,15 +1704,7 @@ private:
         fill(dc, {0, scroll_, area.right, area.bottom + scroll_}, theme_->background);
         const int pad = px(PageInset);
         line(dc, 0, px(60), area.right, px(60), theme_->border);
-        rounded(dc, {pad, px(20), pad + px(24), px(44)}, px(8), theme_->selectionFill, theme_->selectionFill);
-        const POINT pulse[] = {{pad + px(4), px(32)}, {pad + px(8), px(32)},
-            {pad + px(11), px(27)}, {pad + px(14), px(37)}, {pad + px(17), px(32)}, {pad + px(20), px(32)}};
-        if (const auto pen = CreatePen(PS_SOLID, px(2), theme_->blue)) {
-            const auto old = SelectObject(dc, pen);
-            Polyline(dc, pulse, static_cast<int>(std::size(pulse)));
-            SelectObject(dc, old);
-            DeleteObject(pen);
-        }
+        DrawIconEx(dc, pad, px(18), appIcon_, px(28), px(28), 0, nullptr, DI_NORMAL);
         label(dc, titleFont_, L"Computer Watch", {pad + px(34), px(14), pad + px(204), px(50)});
         if (tab_ == Tab::Settings) {
             paintSettings(dc, area);
@@ -1803,6 +1800,7 @@ private:
     }
 
     HINSTANCE instance_;
+    HICON appIcon_{}, trayIcon_{};
     UiCallbacks callbacks_;
     HWND window_{}, liveButton_{}, historyButton_{}, settingsButton_{}, cpuCombo_{}, gpuCombo_{};
     HWND picker_{}, rangeCombo_{}, queryButton_{}, retentionEdit_{}, saveButton_{};
