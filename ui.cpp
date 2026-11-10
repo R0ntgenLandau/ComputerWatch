@@ -35,7 +35,11 @@ constexpr int64_t EpochOffset = 116'444'736'000'000'000;
 constexpr std::array<int64_t, 4> Ranges{MinuteMs, HourMs, DayMs, 7 * DayMs};
 
 constexpr int PageInset = 24;
-constexpr int CardInset = 14;
+constexpr int CardInset = 16;
+constexpr int ModuleGap = 14;
+constexpr int CardHeight = 236;
+constexpr int CardTools = 128;
+constexpr int RankHeight = 314;
 constexpr int RankInset = 14;
 constexpr int RankCpuWidth = 72;
 constexpr int RankMemoryWidth = 92;
@@ -238,8 +242,8 @@ public:
         }
         dpi_ = static_cast<int>(GetDpiForSystem());
         window_ = CreateWindowExW(WS_EX_CONTROLPARENT, WindowClass, L"Computer Watch · 电脑监控",
-            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN, CW_USEDEFAULT, CW_USEDEFAULT,
-            px(1130), px(750), nullptr, nullptr, instance_, this);
+            WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VSCROLL, CW_USEDEFAULT, CW_USEDEFAULT,
+            px(1150), px(720), nullptr, nullptr, instance_, this);
         if (!window_) {
             return false;
         }
@@ -284,23 +288,183 @@ private:
         return child;
     }
 
+    static LRESULT CALLBACK styledControl(HWND child, UINT message, WPARAM wParam, LPARAM lParam,
+        UINT_PTR, DWORD_PTR context) {
+        auto& dashboard = *reinterpret_cast<Dashboard*>(context);
+        switch (message) {
+        case WM_MOUSEMOVE: {
+            if (!GetPropW(child, L"ComputerWatch.Hot")) {
+                SetPropW(child, L"ComputerWatch.Hot", reinterpret_cast<HANDLE>(1));
+                TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, child, 0};
+                TrackMouseEvent(&track);
+                InvalidateRect(child, nullptr, FALSE);
+            }
+            break;
+        }
+        case WM_MOUSELEAVE:
+            RemovePropW(child, L"ComputerWatch.Hot");
+            InvalidateRect(child, nullptr, FALSE);
+            break;
+        case WM_SETFOCUS: {
+            if (GetDlgCtrlID(child) == HistoryPicker) InvalidateRect(child, nullptr, FALSE);
+            if (IsWindowVisible(child) && dashboard.scrollMax_ > 0) {
+                RECT bounds{}, client{};
+                GetWindowRect(child, &bounds);
+                MapWindowPoints(nullptr, dashboard.window_, reinterpret_cast<POINT*>(&bounds), 2);
+                GetClientRect(dashboard.window_, &client);
+                if (bounds.top < 0) dashboard.scrollTo(dashboard.scroll_ + bounds.top - dashboard.px(12));
+                else if (bounds.bottom > client.bottom) {
+                    dashboard.scrollTo(dashboard.scroll_ + bounds.bottom - client.bottom + dashboard.px(12));
+                }
+            }
+            break;
+        }
+        case WM_NCDESTROY:
+            RemovePropW(child, L"ComputerWatch.Hot");
+            break;
+        case WM_NOTIFY: {
+            const auto notification = reinterpret_cast<const NMHDR*>(lParam);
+            const int id = GetDlgCtrlID(child);
+            if ((id == CoreList || id == DiskList) && notification->code == NM_CUSTOMDRAW &&
+                notification->hwndFrom == ListView_GetHeader(child)) {
+                return dashboard.drawDetailHeader(*reinterpret_cast<NMCUSTOMDRAW*>(lParam));
+            }
+            break;
+        }
+        case WM_KILLFOCUS:
+            if (GetDlgCtrlID(child) == HistoryPicker) InvalidateRect(child, nullptr, FALSE);
+            break;
+        case WM_PAINT:
+            if (GetDlgCtrlID(child) == HistoryPicker && dashboard.darkMode_ &&
+                GetFocus() != child && !ui::detail::highContrast()) {
+                PAINTSTRUCT paint{};
+                const auto dc = BeginPaint(child, &paint);
+                dashboard.paintPicker(child, dc);
+                EndPaint(child, &paint);
+                return 0;
+            }
+            if (GetDlgCtrlID(child) == CpuCombo || GetDlgCtrlID(child) == GpuCombo || GetDlgCtrlID(child) == RangeCombo) {
+                PAINTSTRUCT paint{};
+                const auto dc = BeginPaint(child, &paint);
+                RECT bounds{};
+                GetClientRect(child, &bounds);
+                dashboard.paintCombo(child, dc, bounds);
+                EndPaint(child, &paint);
+                return 0;
+            }
+            break;
+        }
+        return DefSubclassProc(child, message, wParam, lParam);
+    }
+
+    LRESULT drawDetailHeader(const NMCUSTOMDRAW& draw) const {
+        if (ui::detail::highContrast()) return CDRF_DODEFAULT;
+        if (draw.dwDrawStage == CDDS_PREPAINT) {
+            fill(draw.hdc, draw.rc, theme_->background);
+            return CDRF_NOTIFYITEMDRAW;
+        }
+        if (draw.dwDrawStage != CDDS_ITEMPREPAINT) return CDRF_DODEFAULT;
+        const bool hot = (draw.uItemState & CDIS_HOT) != 0;
+        fill(draw.hdc, draw.rc, hot ? theme_->selectionFill : theme_->background);
+        line(draw.hdc, draw.rc.left, draw.rc.bottom - 1, draw.rc.right, draw.rc.bottom - 1, theme_->border);
+        wchar_t caption[96]{};
+        HDITEMW item{};
+        item.mask = HDI_TEXT;
+        item.pszText = caption;
+        item.cchTextMax = static_cast<int>(std::size(caption));
+        SendMessageW(draw.hdr.hwndFrom, HDM_GETITEMW, draw.dwItemSpec, reinterpret_cast<LPARAM>(&item));
+        auto textBounds = draw.rc;
+        InflateRect(&textBounds, -px(5), 0);
+        label(draw.hdc, smallFont_, caption, textBounds, theme_->secondary);
+        return CDRF_SKIPDEFAULT;
+    }
+
+    void paintPicker(HWND child, HDC dc) const {
+        RECT bounds{};
+        GetClientRect(child, &bounds);
+        fill(dc, bounds, theme_->surface);
+        rounded(dc, bounds, px(8), theme_->surface, theme_->border);
+        DATETIMEPICKERINFO info{};
+        info.cbSize = sizeof(info);
+        SendMessageW(child, DTM_GETDATETIMEPICKERINFO, 0, reinterpret_cast<LPARAM>(&info));
+        SYSTEMTIME date{};
+        const bool valid = SendMessageW(child, DTM_GETSYSTEMTIME, 0, reinterpret_cast<LPARAM>(&date)) == GDT_VALID;
+        const auto timestamp = valid ? fromLocalTime(date) : std::nullopt;
+        bounds.left += px(8);
+        bounds.right = info.rcButton.left > bounds.left ? info.rcButton.left : bounds.right - px(23);
+        label(dc, smallFont_, timestamp ? timeText(*timestamp, true) : L"—", bounds, theme_->ink);
+        const int x = (bounds.right + info.rcButton.right) / 2;
+        const int y = bounds.bottom / 2;
+        line(dc, x - px(4), y - px(2), x, y + px(2), theme_->secondary);
+        line(dc, x, y + px(2), x + px(5), y - px(3), theme_->secondary);
+    }
+
+    void paintCombo(HWND child, HDC dc, RECT bounds) const {
+        const auto& theme = *theme_;
+        const bool contrast = ui::detail::highContrast();
+        const bool open = SendMessageW(child, CB_GETDROPPEDSTATE, 0, 0);
+        const auto background = contrast ? GetSysColor(COLOR_WINDOW) : theme.surface;
+        const auto ink = contrast ? GetSysColor(COLOR_WINDOWTEXT) :
+            IsWindowEnabled(child) ? theme.ink : theme.muted;
+        const auto face = contrast ? background : open ? theme.pressedFill :
+            GetPropW(child, L"ComputerWatch.Hot") ? theme.selectionFill : theme.surface;
+        fill(dc, bounds, background);
+        rounded(dc, bounds, px(8), face, contrast ? ink : theme.border);
+        const int arrow = bounds.right - px(13);
+        const int middle = bounds.bottom / 2;
+        line(dc, arrow - px(4), middle - px(2), arrow, middle + px(2), ink);
+        line(dc, arrow, middle + px(2), arrow + px(5), middle - px(3), ink);
+        bounds.left += px(8);
+        bounds.right -= px(25);
+        label(dc, smallFont_, comboText(child, static_cast<int>(SendMessageW(child, CB_GETCURSEL, 0, 0))), bounds, ink);
+        if (GetFocus() == child) {
+            bounds.left -= px(8);
+            bounds.right += px(25);
+            ui::detail::focus(dc, bounds, dpi_, contrast ? ink : theme.blue, contrast);
+        }
+    }
+
+    std::wstring comboText(HWND child, int index) const {
+        if (index < 0) return {};
+        const auto length = SendMessageW(child, CB_GETLBTEXTLEN, index, 0);
+        if (length == CB_ERR) return {};
+        std::wstring text(static_cast<size_t>(length) + 1, L'\0');
+        SendMessageW(child, CB_GETLBTEXT, index, reinterpret_cast<LPARAM>(text.data()));
+        text.resize(static_cast<size_t>(length));
+        return text;
+    }
+
+    void sizeCombo(HWND child) const {
+        SendMessageW(child, CB_SETITEMHEIGHT, static_cast<WPARAM>(-1), px(24));
+        SendMessageW(child, CB_SETITEMHEIGHT, 0, px(26));
+    }
+
+    void styleControl(HWND child) {
+        SetWindowSubclass(child, styledControl, 1, reinterpret_cast<DWORD_PTR>(this));
+    }
+
     HWND combo(int id, std::initializer_list<const wchar_t*> options) {
-        const auto child = control(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | WS_VSCROLL, id);
+        const auto child = control(WC_COMBOBOXW, L"", CBS_DROPDOWNLIST | CBS_OWNERDRAWFIXED | CBS_HASSTRINGS | WS_VSCROLL, id);
         for (auto option : options) {
             SendMessageW(child, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(option));
         }
         SendMessageW(child, CB_SETCURSEL, 0, 0);
+        sizeCombo(child);
+        styleControl(child);
         return child;
     }
 
     HWND button(ControlId id) {
-        return control(WC_BUTTONW, buttonCaption(id), BS_OWNERDRAW, id);
+        const auto child = control(WC_BUTTONW, buttonCaption(id), BS_OWNERDRAW, id);
+        styleControl(child);
+        return child;
     }
 
     template<size_t N>
     HWND detailList(int id, const std::pair<const wchar_t*, int> (&columns)[N]) {
         const auto child = control(WC_LISTVIEWW, L"",
             LVS_REPORT | LVS_OWNERDATA | LVS_SINGLESEL | LVS_SHOWSELALWAYS, id);
+        styleControl(child);
         SendMessageW(child, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, LVS_EX_FULLROWSELECT | LVS_EX_DOUBLEBUFFER);
         int index = 0;
         for (const auto& [name, width] : columns) {
@@ -324,8 +488,8 @@ private:
         const auto oldFonts = std::array{normalFont_, smallFont_, titleFont_, valueFont_, boldFont_};
         normalFont_ = font(13);
         smallFont_ = font(12);
-        titleFont_ = font(26, FW_SEMIBOLD, L"Segoe UI");
-        valueFont_ = font(29, FW_SEMIBOLD, L"Segoe UI");
+        titleFont_ = font(20, FW_SEMIBOLD, L"Segoe UI");
+        valueFont_ = font(34, FW_SEMIBOLD, L"Consolas");
         boldFont_ = font(15, FW_SEMIBOLD);
         for (const auto child : {liveButton_, historyButton_, settingsButton_, cpuCombo_, gpuCombo_, rangeCombo_,
             cpuDetailButton_, gpuDetailButton_, diskDetailButton_, detailBackButton_, picker_, queryButton_,
@@ -345,13 +509,14 @@ private:
         liveButton_ = button(LiveButton);
         historyButton_ = button(HistoryButton);
         settingsButton_ = button(SettingsButton);
-        cpuCombo_ = combo(CpuCombo, {L"占用率曲线", L"封装温度曲线", L"封装功耗曲线"});
-        gpuCombo_ = combo(GpuCombo, {L"占用率曲线", L"温度曲线", L"板卡功耗曲线"});
+        cpuCombo_ = combo(CpuCombo, {L"占用率 %", L"封装温度 °C", L"封装功耗 W"});
+        gpuCombo_ = combo(GpuCombo, {L"占用率 %", L"温度 °C", L"板卡功耗 W"});
         cpuDetailButton_ = button(CpuDetailButton);
         gpuDetailButton_ = button(GpuDetailButton);
         diskDetailButton_ = button(DiskDetailButton);
         detailBackButton_ = button(DetailBackButton);
         picker_ = control(DATETIMEPICK_CLASSW, L"", DTS_SHORTDATEFORMAT, HistoryPicker);
+        styleControl(picker_);
         SendMessageW(picker_, DTM_SETFORMATW, 0, reinterpret_cast<LPARAM>(L"yyyy-MM-dd HH:mm:ss"));
         rangeCombo_ = combo(RangeCombo, {L"60 秒", L"1 小时", L"24 小时", L"7 天"});
         queryButton_ = button(QueryButton);
@@ -362,9 +527,19 @@ private:
         darkThemeButton_ = button(DarkThemeButton);
         for (int i = 0; i < static_cast<int>(sortButtons_.size()); ++i) {
             sortButtons_[i] = control(WC_BUTTONW, L"", BS_OWNERDRAW, LeftSortCpu + i);
+            styleControl(sortButtons_[i]);
             SendMessageW(sortButtons_[i], WM_SETFONT, reinterpret_cast<WPARAM>(smallFont_), FALSE);
         }
         updateSortHeaders();
+        rankTooltip_ = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+            0, 0, 0, 0, window_, nullptr, instance_, nullptr);
+        TOOLINFOW tool{};
+        tool.cbSize = sizeof(tool);
+        tool.uFlags = TTF_SUBCLASS;
+        tool.hwnd = window_;
+        tool.uId = 1;
+        tool.lpszText = LPSTR_TEXTCALLBACKW;
+        SendMessageW(rankTooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
         coreList_ = detailList(CoreList, CoreColumns);
         diskList_ = detailList(DiskList, DiskColumns);
     }
@@ -383,6 +558,8 @@ private:
 
         // The Windows theme class is best effort. The canvas and text colors are owned by the app.
         const auto nativeTheme = darkMode_ ? L"DarkMode_Explorer" : nullptr;
+        SetWindowTheme(window_, nativeTheme, nullptr);
+        SetWindowTheme(rankTooltip_, nativeTheme, nullptr);
         for (const auto child : {cpuCombo_, gpuCombo_, rangeCombo_, picker_, retentionEdit_, coreList_, diskList_}) {
             SetWindowTheme(child, nativeTheme, nullptr);
         }
@@ -413,6 +590,7 @@ private:
     }
 
     void move(HWND control, int x, int y, int width, int height, bool showControl = true) {
+        y -= scroll_;
         const bool wasVisible = (GetWindowLongPtrW(control, GWL_STYLE) & WS_VISIBLE) != 0;
         const UINT visibility = showControl == wasVisible ? 0 : showControl ? SWP_SHOWWINDOW : SWP_HIDEWINDOW;
         SetWindowPos(control, nullptr, x, y, std::max(width, 0), std::max(height, 0),
@@ -433,25 +611,42 @@ private:
     }
 
     RECT rankPanel(RECT area, size_t index) const {
-        const int top = cards_[0].bottom + px(27);
-        const int bottom = std::min(static_cast<int>(area.bottom) - px(16), top + px(350));
+        const int top = cards_.back().bottom + px(30);
+        if (area.right < px(780)) {
+            const int y = top + static_cast<int>(index) * px(RankHeight + ModuleGap);
+            return {px(PageInset), y, area.right - px(PageInset), y + px(RankHeight)};
+        }
         return index == 0
-            ? RECT{px(PageInset), top, area.right / 2 - px(6), bottom}
-            : RECT{area.right / 2 + px(6), top, area.right - px(PageInset), bottom};
+            ? RECT{px(PageInset), top, area.right / 2 - px(ModuleGap / 2), top + px(RankHeight)}
+            : RECT{area.right / 2 + px(ModuleGap / 2), top, area.right - px(PageInset), top + px(RankHeight)};
+    }
+
+    int statusOffset(RECT area) const {
+        return area.right < px(755) ? px(22) : 0;
     }
 
     void layout() {
         RECT area{};
         GetClientRect(window_, &area);
+        TOOLINFOW tool{};
+        tool.cbSize = sizeof(tool);
+        tool.hwnd = window_;
+        tool.uId = 1;
+        tool.rect = area;
+        SendMessageW(rankTooltip_, TTM_NEWTOOLRECTW, 0, reinterpret_cast<LPARAM>(&tool));
         const int pad = px(PageInset);
-        const int gap = px(12);
-        const int contentWidth = std::max(5, static_cast<int>(area.right) - 2 * pad - 4 * gap);
-        const int cardY = px(tab_ == Tab::History ? 153 : 116);
+        const int gap = px(ModuleGap);
+        const int columns = std::clamp((static_cast<int>(area.right) - 2 * pad + gap) /
+            px(194 + ModuleGap), 2, 5);
+        const int contentWidth = static_cast<int>(area.right) - 2 * pad - (columns - 1) * gap;
+        const int extra = statusOffset(area);
+        const int cardY = px(tab_ == Tab::History ? 126 : 76) + extra;
         for (size_t i = 0; i < cards_.size(); ++i) {
-            const int index = static_cast<int>(i);
-            const int x = pad + index * gap + contentWidth * index / 5;
-            const int right = pad + index * gap + contentWidth * (index + 1) / 5;
-            cards_[i] = {x, cardY, right, cardY + px(190)};
+            const int column = static_cast<int>(i) % columns;
+            const int y = cardY + static_cast<int>(i) / columns * px(CardHeight + ModuleGap);
+            const int x = pad + column * gap + contentWidth * column / columns;
+            const int right = pad + column * gap + contentWidth * (column + 1) / columns;
+            cards_[i] = {x, y, right, y + px(CardHeight)};
         }
         const auto detail = detailPane();
         const bool inDetail = detail != DetailPane::None;
@@ -459,22 +654,38 @@ private:
         const bool history = tab_ == Tab::History;
         const bool settings = tab_ == Tab::Settings;
         const bool overview = live || history;
-        move(liveButton_, pad, px(70), px(90), px(31), !inDetail);
-        move(historyButton_, pad + px(96), px(70), px(90), px(31), !inDetail);
-        move(settingsButton_, pad + px(192), px(70), px(64), px(31), !inDetail);
-        move(detailBackButton_, pad, px(70), px(122), px(30), inDetail);
-        move(cpuCombo_, cards_[0].left + px(CardInset), cardY + px(106), px(120), px(130), overview);
-        move(gpuCombo_, cards_[3].left + px(CardInset), cardY + px(106), px(120), px(130), overview);
-        move(cpuDetailButton_, cards_[0].right - px(CardInset + 49), cardY + px(10), px(49), px(24), live);
-        move(gpuDetailButton_, cards_[3].right - px(CardInset + 49), cardY + px(10), px(49), px(24), live);
-        move(diskDetailButton_, cards_[2].right - px(CardInset + 64), cardY + px(10), px(64), px(24), live);
-        move(picker_, pad + px(70), px(110), px(202), px(27), history);
-        move(rangeCombo_, pad + px(281), px(110), px(92), px(120), history);
-        move(queryButton_, pad + px(383), px(110), px(68), px(27), history);
-        move(retentionEdit_, pad + px(116), px(180), px(68), px(29), settings);
-        move(saveButton_, pad + px(224), px(180), px(74), px(29), settings);
-        move(lightThemeButton_, pad + px(116), px(344), px(76), px(30), settings);
-        move(darkThemeButton_, pad + px(200), px(344), px(76), px(30), settings);
+        const int contentBottom = overview ? rankPanel(area, 1).bottom + pad :
+            px(settings ? 390 : detail == DetailPane::Gpu ? 446 : 390);
+        scrollMax_ = std::max(0, contentBottom - static_cast<int>(area.bottom));
+        scroll_ = std::clamp(scroll_, 0, scrollMax_);
+        const SCROLLINFO scrollInfo{sizeof(SCROLLINFO), SIF_RANGE | SIF_PAGE | SIF_POS,
+            0, std::max(contentBottom, static_cast<int>(area.bottom)) - 1,
+            static_cast<UINT>(area.bottom), scroll_, 0};
+        SetScrollInfo(window_, SB_VERT, &scrollInfo, TRUE);
+        RECT afterScroll{};
+        GetClientRect(window_, &afterScroll);
+        if (afterScroll.right != area.right) {
+            layout();
+            return;
+        }
+
+        const int nav = pad + px(209);
+        move(liveButton_, nav, px(17), px(82), px(32), !inDetail);
+        move(historyButton_, nav + px(86), px(17), px(82), px(32), !inDetail);
+        move(settingsButton_, nav + px(172), px(17), px(55), px(32), !inDetail);
+        move(detailBackButton_, nav, px(17), px(118), px(32), inDetail);
+        move(cpuCombo_, cards_[0].left + px(CardInset), cards_[0].top + px(CardTools), px(125), px(125), overview);
+        move(gpuCombo_, cards_[3].left + px(CardInset), cards_[3].top + px(CardTools), px(125), px(125), overview);
+        move(cpuDetailButton_, cards_[0].right - px(CardInset + 46), cards_[0].top + px(12), px(46), px(24), live);
+        move(gpuDetailButton_, cards_[3].right - px(CardInset + 46), cards_[3].top + px(12), px(46), px(24), live);
+        move(diskDetailButton_, cards_[2].right - px(CardInset + 60), cards_[2].top + px(12), px(60), px(24), live);
+        move(picker_, pad + px(70), px(78) + extra, px(202), px(27), history);
+        move(rangeCombo_, pad + px(281), px(78) + extra, px(92), px(120), history);
+        move(queryButton_, pad + px(383), px(78) + extra, px(68), px(27), history);
+        move(retentionEdit_, pad + px(116), px(144), px(68), px(29), settings);
+        move(saveButton_, pad + px(224), px(144), px(74), px(29), settings);
+        move(lightThemeButton_, pad + px(116), px(308), px(76), px(30), settings);
+        move(darkThemeButton_, pad + px(200), px(308), px(76), px(30), settings);
         for (size_t index = 0; index < rankSorts_.size(); ++index) {
             const auto panel = rankPanel(area, index);
             const int right = panel.right - px(RankInset);
@@ -486,10 +697,21 @@ private:
             move(sortButtons_[2 * index + 1], right - memoryWidth, headerY,
                 memoryWidth, px(RankHeaderHeight), overview);
         }
-        move(coreList_, pad + px(12), px(281), static_cast<int>(area.right) - 2 * pad - px(24),
-            std::max(0, static_cast<int>(area.bottom) - px(302)), detail == DetailPane::Cpu && !details_.cores.empty());
-        move(diskList_, pad + px(12), px(185), static_cast<int>(area.right) - 2 * pad - px(24),
-            std::max(0, static_cast<int>(area.bottom) - px(275)), detail == DetailPane::Disk && !details_.disks.empty());
+        const int detailBottom = std::max(static_cast<int>(area.bottom), contentBottom);
+        move(coreList_, pad + px(12), px(253), static_cast<int>(area.right) - 2 * pad - px(24),
+            std::max(0, detailBottom - px(274)), detail == DetailPane::Cpu && !details_.cores.empty());
+        move(diskList_, pad + px(12), px(157), static_cast<int>(area.right) - 2 * pad - px(24),
+            std::max(0, detailBottom - px(247)), detail == DetailPane::Disk && !details_.disks.empty());
+    }
+
+    void scrollTo(int position) {
+        position = std::clamp(position, 0, scrollMax_);
+        if (position == scroll_) return;
+        scroll_ = position;
+        cursor_ = {-1, -1};
+        SendMessageW(rankTooltip_, TTM_POP, 0, 0);
+        layout();
+        invalidate();
     }
 
     void invalidate() const { InvalidateRect(window_, nullptr, FALSE); }
@@ -753,7 +975,7 @@ private:
     }
 
     RECT chartRect(const RECT& card) const {
-        return {card.left + px(CardInset), card.top + px(140), card.right - px(CardInset), card.bottom - px(CardInset)};
+        return {card.left + px(CardInset), card.top + px(151), card.right - px(CardInset), card.bottom - px(CardInset)};
     }
 
     RECT chartPlot(RECT area) const {
@@ -789,6 +1011,7 @@ private:
 
     void activate(Tab target) {
         tab_ = target;
+        scroll_ = 0;
         for (const auto child : {liveButton_, historyButton_, settingsButton_}) {
             InvalidateRect(child, nullptr, FALSE);
         }
@@ -831,7 +1054,26 @@ private:
         invalidate();
     }
 
-    bool drawControl(const DRAWITEMSTRUCT& item) const {
+    bool drawControl(DRAWITEMSTRUCT item) const {
+        if (item.CtlType == ODT_COMBOBOX) {
+            if (item.itemState & ODS_COMBOBOXEDIT) {
+                paintCombo(item.hwndItem, item.hDC, item.rcItem);
+                return true;
+            }
+            const bool selected = (item.itemState & ODS_SELECTED) != 0;
+            const bool contrast = ui::detail::highContrast();
+            const auto background = contrast ? GetSysColor(selected ? COLOR_HIGHLIGHT : COLOR_WINDOW)
+                : selected ? theme_->selectionFill : theme_->surface;
+            const auto ink = contrast ? GetSysColor(selected ? COLOR_HIGHLIGHTTEXT : COLOR_WINDOWTEXT)
+                : selected ? theme_->blue : theme_->ink;
+            fill(item.hDC, item.rcItem, background);
+            auto bounds = item.rcItem;
+            bounds.left += px(8);
+            bounds.right -= px(6);
+            label(item.hDC, smallFont_, comboText(item.hwndItem, static_cast<int>(item.itemID)), bounds, ink);
+            return true;
+        }
+        if (GetPropW(item.hwndItem, L"ComputerWatch.Hot")) item.itemState |= ODS_HOTLIGHT;
         using ui::ButtonKind;
         const auto id = item.CtlID;
         if (id >= LeftSortCpu && id <= RightSortMemory) {
@@ -873,12 +1115,15 @@ private:
             return 0;
         case WM_GETMINMAXINFO: {
             const auto limits = reinterpret_cast<MINMAXINFO*>(lParam);
-            limits->ptMinTrackSize = {px(1040), px(686)};
+            limits->ptMinTrackSize = {px(550), px(380)};
             return 0;
         }
         case WM_DPICHANGED: {
+            const int previousDpi = dpi_;
             dpi_ = LOWORD(wParam);
+            scroll_ = MulDiv(scroll_, dpi_, previousDpi);
             refreshFonts();
+            for (const auto child : {cpuCombo_, gpuCombo_, rangeCombo_}) sizeCombo(child);
             scaleColumns(coreList_, CoreColumns);
             scaleColumns(diskList_, DiskColumns);
             const auto& bounds = *reinterpret_cast<const RECT*>(lParam);
@@ -908,6 +1153,27 @@ private:
                 refreshLive();
             }
             return 0;
+        case WM_MOUSEWHEEL:
+            wheelDelta_ += GET_WHEEL_DELTA_WPARAM(wParam);
+            scrollTo(scroll_ - wheelDelta_ / WHEEL_DELTA * px(72));
+            wheelDelta_ %= WHEEL_DELTA;
+            return 0;
+        case WM_VSCROLL: {
+            SCROLLINFO info{};
+            info.cbSize = sizeof(info);
+            info.fMask = SIF_TRACKPOS | SIF_PAGE;
+            GetScrollInfo(window_, SB_VERT, &info);
+            switch (LOWORD(wParam)) {
+            case SB_LINEUP: scrollTo(scroll_ - px(32)); break;
+            case SB_LINEDOWN: scrollTo(scroll_ + px(32)); break;
+            case SB_PAGEUP: scrollTo(scroll_ - static_cast<int>(info.nPage)); break;
+            case SB_PAGEDOWN: scrollTo(scroll_ + static_cast<int>(info.nPage)); break;
+            case SB_THUMBTRACK: case SB_THUMBPOSITION: scrollTo(info.nTrackPos); break;
+            case SB_TOP: scrollTo(0); break;
+            case SB_BOTTOM: scrollTo(scrollMax_); break;
+            }
+            return 0;
+        }
         case WM_DRAWITEM:
             if (lParam && drawControl(*reinterpret_cast<const DRAWITEMSTRUCT*>(lParam))) return TRUE;
             break;
@@ -945,6 +1211,14 @@ private:
                 PostMessageW(window_, ButtonMessage, LOWORD(wParam), 0);
                 return 0;
             }
+            if (HIWORD(wParam) == CBN_DROPDOWN || HIWORD(wParam) == CBN_CLOSEUP ||
+                HIWORD(wParam) == CBN_SELCHANGE) {
+                const auto id = LOWORD(wParam);
+                if (id == CpuCombo || id == GpuCombo || id == RangeCombo) {
+                    InvalidateRect(reinterpret_cast<HWND>(lParam), nullptr, FALSE);
+                    if (HIWORD(wParam) != CBN_SELCHANGE) return 0;
+                }
+            }
             if (HIWORD(wParam) == CBN_SELCHANGE) {
                 if (LOWORD(wParam) == CpuCombo || LOWORD(wParam) == GpuCombo) {
                     invalidate();
@@ -956,6 +1230,17 @@ private:
             break;
         case WM_NOTIFY: {
             const auto notification = reinterpret_cast<NMHDR*>(lParam);
+            if (notification->hwndFrom == picker_ && notification->code == DTN_DROPDOWN && darkMode_) {
+                const auto calendar = DateTime_GetMonthCal(picker_);
+                if (calendar) SetWindowTheme(calendar, L"", nullptr);
+            }
+            if (notification->hwndFrom == rankTooltip_ && notification->code == TTN_GETDISPINFOW) {
+                const auto tip = std::find_if(rankTips_.begin(), rankTips_.end(),
+                    [&](const RankTip& entry) { return PtInRect(&entry.bounds, cursor_); });
+                tooltipText_ = tip == rankTips_.end() ? L"" : tip->text;
+                reinterpret_cast<NMTTDISPINFOW*>(lParam)->lpszText = tooltipText_.data();
+                return 0;
+            }
             if (notification->hwndFrom != coreList_ && notification->hwndFrom != diskList_) {
                 break;
             }
@@ -971,8 +1256,26 @@ private:
             }
             return 0;
         }
+        case WM_MOUSEMOVE: {
+            const POINT position{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) + scroll_};
+            for (const auto& tip : rankTips_) {
+                if (PtInRect(&tip.bounds, position) != PtInRect(&tip.bounds, cursor_)) {
+                    SendMessageW(rankTooltip_, TTM_POP, 0, 0);
+                    invalidate();
+                    break;
+                }
+            }
+            cursor_ = position;
+            TRACKMOUSEEVENT track{sizeof(track), TME_LEAVE, window_, 0};
+            TrackMouseEvent(&track);
+            break;
+        }
+        case WM_MOUSELEAVE:
+            cursor_ = {-1, -1};
+            invalidate();
+            break;
         case WM_LBUTTONUP:
-            clickChart(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam));
+            clickChart(GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) + scroll_);
             return 0;
         case WM_CLOSE:
             if (trayAdded_) {
@@ -1034,12 +1337,18 @@ private:
     }
 
     void chartLine(HDC dc, const RECT& area, const std::vector<Snapshot>& samples, Metric metric,
-        COLORREF color, int64_t start, int64_t end, double maximum) const {
+        COLORREF color, int64_t start, int64_t end, double maximum, bool shade = false) const {
         const auto pen = CreatePen(PS_SOLID, px(2), color);
         if (!pen) {
             return;
         }
         const auto old = SelectObject(dc, pen);
+        const auto oldBrush = SelectObject(dc, GetStockObject(DC_BRUSH));
+        const auto tint = [](int base, int accent) { return (base * 9 + accent) / 10; };
+        const auto surface = theme_->surface;
+        const auto shadeColor = RGB(tint(GetRValue(surface), GetRValue(color)),
+            tint(GetGValue(surface), GetGValue(color)), tint(GetBValue(surface), GetBValue(color)));
+        POINT previousPoint{};
         bool previous = false;
         int64_t previousTime = 0;
         const auto maxGap = tab_ == Tab::Live ? 7'500 : std::max<int64_t>(
@@ -1058,6 +1367,15 @@ private:
             const int x = area.left + static_cast<int>(std::lround(fraction * (area.right - area.left - 2)));
             const int y = area.bottom - 2 - static_cast<int>(std::lround(yFraction * (area.bottom - area.top - 3)));
             if (previous && sample.timestampMs - previousTime <= maxGap) {
+                if (shade) {
+                    const POINT areaFill[] = {previousPoint, {x, y},
+                        {x, area.bottom - 1}, {previousPoint.x, area.bottom - 1}};
+                    const auto stroke = SelectObject(dc, GetStockObject(NULL_PEN));
+                    SetDCBrushColor(dc, shadeColor);
+                    Polygon(dc, areaFill, static_cast<int>(std::size(areaFill)));
+                    SelectObject(dc, stroke);
+                    MoveToEx(dc, previousPoint.x, previousPoint.y, nullptr);
+                }
                 LineTo(dc, x, y);
             } else {
                 fill(dc, {x, y, x + px(2), y + px(2)}, color);
@@ -1065,14 +1383,15 @@ private:
             }
             previous = true;
             previousTime = sample.timestampMs;
+            previousPoint = {x, y};
         }
+        SelectObject(dc, oldBrush);
         SelectObject(dc, old);
         DeleteObject(pen);
     }
 
     void paintChart(HDC dc, const RECT& area, Chart chart, const std::vector<Snapshot>& samples,
         int64_t start, int64_t end, COLORREF accent) const {
-        rounded(dc, area, px(10), theme_->chartBg, theme_->chartBg);
         const auto plot = chartPlot(area);
         for (int i = 1; i <= 3; ++i) {
             const int x = plot.left + (plot.right - plot.left) * i / 4;
@@ -1101,7 +1420,7 @@ private:
             label(dc, smallFont_, L"暂无曲线", area, theme_->muted, DT_CENTER);
             return;
         }
-        chartLine(dc, plot, samples, chart.primary, accent, start, end, maximum);
+        chartLine(dc, plot, samples, chart.primary, accent, start, end, maximum, !chart.secondary);
         if (chart.secondary) {
             chartLine(dc, plot, samples, *chart.secondary, theme_->teal, start, end, maximum);
         }
@@ -1115,11 +1434,13 @@ private:
     void cardValue(HDC dc, std::wstring_view text, RECT area) const {
         const auto separator = text.find_first_of(L" %");
         const auto number = text.substr(0, separator);
-        label(dc, valueFont_, number, area);
+        const auto valueFace = textWidth(dc, valueFont_, text) > area.right - area.left && area.right - area.left < px(110)
+            ? boldFont_ : valueFont_;
+        label(dc, valueFace, number, area);
         if (separator != std::wstring_view::npos) {
             const auto unit = text.substr(separator + (text[separator] == L' ' ? 1 : 0));
-            area.left += textWidth(dc, valueFont_, number) + px(5);
-            area.top += px(11);
+            area.left += textWidth(dc, valueFace, number) + px(5);
+            if (valueFace == valueFont_) area.top += px(11);
             if (area.left < area.right) label(dc, normalFont_, unit, area, theme_->secondary);
         }
     }
@@ -1131,9 +1452,10 @@ private:
         const auto accent = theme_->cardColors[index];
         const int left = card.left + px(CardInset);
         const int right = card.right - px(CardInset);
-        rounded(dc, card, px(18), theme_->surface, theme_->border);
-        rounded(dc, {left, card.top + px(18), left + px(7), card.top + px(25)}, px(7), accent, accent);
-        label(dc, boldFont_, names[index], {left + px(14), card.top + px(9), right, card.top + px(34)});
+        rounded(dc, card, px(22), theme_->surface, theme_->border);
+        static constexpr std::array metricNames{L"处理器占用率", L"内存占用率", L"已用容量", L"显卡占用率", L"下载速率"};
+        label(dc, boldFont_, names[index], {left, card.top + px(12), right, card.top + px(36)});
+        label(dc, smallFont_, metricNames[index], {left, card.top + px(39), right, card.top + px(57)}, theme_->muted);
         std::wstring primary;
         std::wstring detail;
         std::wstring firstLegend;
@@ -1141,28 +1463,31 @@ private:
         switch (index) {
         case 0:
             primary = decimal(value(snapshot, Metric::CpuPercent), 1, L"%");
-            detail = decimal(value(snapshot, Metric::CpuTemp), 0, L" °C") + L"  ·  "
+            detail = L"封装 " + decimal(value(snapshot, Metric::CpuTemp), 0, L" °C") + L"  ·  "
                 + decimal(value(snapshot, Metric::CpuWatts), 1, L" W");
-            if (std::isfinite(value(snapshot, Metric::CpuWatts))) detail += L" RAPL";
+
             break;
         case 1:
             primary = decimal(value(snapshot, Metric::MemoryPercent), 1, L"%");
             detail = bytes(value(snapshot, Metric::MemoryUsed)) + L" / " + bytes(value(snapshot, Metric::MemoryTotal));
-            firstLegend = L"占用率曲线";
+            firstLegend = L"占用率 %";
             break;
         case 2:
             primary = bytes(value(snapshot, Metric::DiskUsed));
             detail = L"总容量 " + bytes(value(snapshot, Metric::DiskTotal));
-            firstLegend = L"读 " + bytes(value(snapshot, Metric::DiskRead), true);
-            secondLegend = L"写 " + bytes(value(snapshot, Metric::DiskWrite), true);
+            label(dc, smallFont_, L"读 " + bytes(value(snapshot, Metric::DiskRead), true) +
+                L"  /  写 " + bytes(value(snapshot, Metric::DiskWrite), true),
+                {left, card.top + px(107), right, card.top + px(125)}, theme_->secondary);
+            firstLegend = L"读取";
+            secondLegend = L"写入";
             break;
         case 3:
             primary = decimal(value(snapshot, Metric::GpuPercent), 1, L"%");
-            detail = decimal(value(snapshot, Metric::GpuTemp), 0, L" °C") + L"  ·  "
+            detail = L"核心 " + decimal(value(snapshot, Metric::GpuTemp), 0, L" °C") + L"  ·  "
                 + decimal(value(snapshot, Metric::GpuWatts), 1, L" W");
             label(dc, smallFont_, L"显存 " + bytes(value(snapshot, Metric::GpuMemoryUsed)) + L" / "
                 + bytes(value(snapshot, Metric::GpuMemoryTotal)),
-                {left, card.top + px(85), right, card.top + px(104)}, theme_->secondary);
+                {left, card.top + px(107), right, card.top + px(125)}, theme_->secondary);
             break;
         case 4:
             primary = bytes(value(snapshot, Metric::NetworkDown), true);
@@ -1171,33 +1496,37 @@ private:
             secondLegend = L"上传";
             break;
         }
-        cardValue(dc, primary, {left, card.top + px(33), right, card.top + px(67)});
-        label(dc, smallFont_, detail, {left, card.top + px(66), right, card.top + px(86)}, theme_->secondary);
+        cardValue(dc, primary, {left, card.top + px(54), right, card.top + px(91)});
+        label(dc, smallFont_, detail, {left, card.top + px(89), right, card.top + px(107)}, theme_->secondary);
         const int legendMid = (left + right) / 2;
+        const int toolsY = card.top + px(CardTools);
+        const auto legend = [&](int x, int end, std::wstring_view text, COLORREF color) {
+            fill(dc, {x, toolsY + px(12), x + px(10), toolsY + px(14)}, color);
+            label(dc, smallFont_, text, {x + px(15), toolsY, end, toolsY + px(26)}, theme_->secondary);
+        };
         if (!secondLegend.empty()) {
-            label(dc, smallFont_, firstLegend, {left, card.top + px(106), legendMid, card.top + px(133)}, accent);
-            label(dc, smallFont_, secondLegend, {legendMid, card.top + px(106), right, card.top + px(133)}, theme_->teal, DT_RIGHT);
+            legend(left, legendMid, firstLegend, accent);
+            legend(legendMid, right, secondLegend, theme_->teal);
         } else if (!firstLegend.empty()) {
-            label(dc, smallFont_, firstLegend, {left, card.top + px(106), right, card.top + px(133)}, accent);
+            legend(left, right, firstLegend, accent);
         }
         paintChart(dc, chartRect(card), chartFor(index), samples, start, end, accent);
     }
 
     void paintRanks(HDC dc, RECT panel, const wchar_t* title,
-        const std::array<ProcessEntry, TopCount>* ranks, RankSort sort, COLORREF accent) const {
-        rounded(dc, panel, px(18), theme_->surface, theme_->border);
+        const std::array<ProcessEntry, TopCount>* ranks, RankSort sort, size_t table) const {
+        rounded(dc, panel, px(22), theme_->surface, theme_->border);
         const int left = panel.left + px(RankInset);
         const int right = panel.right - px(RankInset);
-        const int pidWidth = px(70);
+        const int pidWidth = px(62);
         const int cpuWidth = px(RankCpuWidth);
         const int memWidth = px(RankMemoryWidth);
-        rounded(dc, {left, panel.top + px(15), left + px(4), panel.top + px(27)}, px(4), accent, accent);
-        label(dc, boldFont_, title, {left + px(12), panel.top + px(7), right, panel.top + px(34)});
+        label(dc, boldFont_, title, {left, panel.top + px(7), right, panel.top + px(34)});
         const int headerY = panel.top + px(RankHeaderOffset);
         auto drawRow = [&](int y, int height, std::wstring_view name, std::wstring_view pid,
             std::wstring_view cpu, std::wstring_view memory, COLORREF color) {
             label(dc, smallFont_, name, {left, y, right - pidWidth - cpuWidth - memWidth, y + height}, color);
-            label(dc, smallFont_, pid, {right - pidWidth - cpuWidth - memWidth, y, right - cpuWidth - memWidth - px(7), y + height}, color, DT_RIGHT);
+            label(dc, smallFont_, pid, {right - pidWidth - cpuWidth - memWidth, y, right - cpuWidth - memWidth - px(7), y + height}, theme_->muted, DT_RIGHT);
             label(dc, smallFont_, cpu, {right - cpuWidth - memWidth, y, right - memWidth - px(7), y + height}, color, DT_RIGHT);
             label(dc, smallFont_, memory, {right - memWidth, y, right - px(7), y + height}, color, DT_RIGHT);
         };
@@ -1238,11 +1567,14 @@ private:
         for (size_t i = 0; i < count; ++i) {
             const auto& process = *rows[i];
             const int y = rowsY + static_cast<int>(i) * rowHeight;
-            if (i % 2 == 0) {
-                fill(dc, {panel.left + px(7), y + 1, panel.right - px(7), y + rowHeight}, theme_->chartBg);
-            }
+            const RECT row{left, y, right, y + rowHeight};
+            if (PtInRect(&row, cursor_)) fill(dc, row, theme_->selectionFill);
+            if (i + 1 < count) line(dc, left, row.bottom, right, row.bottom, theme_->border);
             const auto end = std::find(std::begin(process.name), std::end(process.name), L'\0');
             const std::wstring_view name(process.name, static_cast<size_t>(end - std::begin(process.name)));
+            auto& tip = rankTips_[table * TopCount + i];
+            tip.bounds = row;
+            if (textWidth(dc, smallFont_, name) > right - left - pidWidth - cpuWidth - memWidth) tip.text = name;
             drawRow(y, rowHeight, name, std::to_wstring(process.pid),
                 decimal(hasCpu(&process) ? process.cpu : Missing, 1, L"%"), bytes(static_cast<double>(process.memory)), theme_->ink);
         }
@@ -1250,21 +1582,21 @@ private:
 
     void paintSettings(HDC dc, RECT area) const {
         const int pad = px(24);
-        rounded(dc, {pad, px(116), area.right - pad, px(265)}, px(18), theme_->surface, theme_->border);
-        label(dc, boldFont_, L"历史保留", {pad + px(14), px(125), area.right - pad, px(153)});
+        rounded(dc, {pad, px(80), area.right - pad, px(229)}, px(22), theme_->surface, theme_->border);
+        label(dc, boldFont_, L"历史保留", {pad + px(14), px(89), area.right - pad, px(117)});
         label(dc, smallFont_, L"默认 7 天。超过保留时长的记录会自动清理。",
-            {pad + px(14), px(151), area.right - pad, px(175)}, theme_->secondary);
-        label(dc, normalFont_, L"保留时长", {pad + px(14), px(180), pad + px(107), px(209)}, theme_->secondary);
-        label(dc, normalFont_, L"天", {pad + px(191), px(180), pad + px(218), px(209)}, theme_->secondary);
-        label(dc, smallFont_, settingsMessage_, {pad + px(14), px(221), area.right - pad, px(248)}, theme_->blue);
+            {pad + px(14), px(115), area.right - pad, px(139)}, theme_->secondary);
+        label(dc, normalFont_, L"保留时长", {pad + px(14), px(144), pad + px(107), px(173)}, theme_->secondary);
+        label(dc, normalFont_, L"天", {pad + px(191), px(144), pad + px(218), px(173)}, theme_->secondary);
+        label(dc, smallFont_, settingsMessage_, {pad + px(14), px(185), area.right - pad, px(212)}, theme_->blue);
 
-        rounded(dc, {pad, px(281), area.right - pad, px(404)}, px(18), theme_->surface, theme_->border);
-        label(dc, boldFont_, L"外观主题", {pad + px(14), px(291), area.right - pad, px(320)});
+        rounded(dc, {pad, px(245), area.right - pad, px(368)}, px(22), theme_->surface, theme_->border);
+        label(dc, boldFont_, L"外观主题", {pad + px(14), px(255), area.right - pad, px(284)});
         label(dc, smallFont_, L"切换后立即生效，下次打开沿用所选主题。",
-            {pad + px(14), px(319), area.right - pad, px(340)}, theme_->secondary);
-        label(dc, normalFont_, L"显示模式", {pad + px(14), px(344), pad + px(107), px(374)}, theme_->secondary);
+            {pad + px(14), px(283), area.right - pad, px(304)}, theme_->secondary);
+        label(dc, normalFont_, L"显示模式", {pad + px(14), px(308), pad + px(107), px(338)}, theme_->secondary);
         label(dc, smallFont_, appearanceMessage_,
-            {pad + px(290), px(344), area.right - pad - px(14), px(374)}, theme_->amber);
+            {pad + px(290), px(308), area.right - pad - px(14), px(338)}, theme_->amber);
     }
 
     void paintDetailSummary(HDC dc, RECT area,
@@ -1277,7 +1609,11 @@ private:
             const int right = x + width;
             rounded(dc, {x, area.top, right, area.bottom}, px(14), theme_->surface, theme_->border);
             label(dc, normalFont_, title, {x + px(12), area.top + px(9), right - px(12), area.top + px(32)}, theme_->secondary);
-            cardValue(dc, reading, {x + px(12), area.top + px(34), right - px(12), area.bottom - px(8)});
+            if (reading.find(L" / ") != std::wstring::npos) {
+                label(dc, normalFont_, reading, {x + px(12), area.top + px(34), right - px(12), area.bottom - px(8)});
+            } else {
+                cardValue(dc, reading, {x + px(12), area.top + px(30), right - px(12), area.bottom - px(5)});
+            }
             x = right + gap;
         }
     }
@@ -1285,33 +1621,33 @@ private:
     void paintCpuDetails(HDC dc, RECT area, const Snapshot* snapshot) const {
         const int left = px(24);
         const int right = area.right - left;
-        label(dc, titleFont_, L"CPU 实时详情", {left, px(111), right, px(148)});
-        paintDetailSummary(dc, {left, px(158), right, px(233)}, {
+        label(dc, titleFont_, L"CPU 实时详情", {left, px(83), right, px(120)});
+        paintDetailSummary(dc, {left, px(130), right, px(205)}, {
             {L"整机 CPU 占用率", decimal(value(snapshot, Metric::CpuPercent), 1, L"%")},
             {L"CPU 封装温度", decimal(value(snapshot, Metric::CpuTemp), 0, L" °C")},
             {L"CPU 封装功耗 · RAPL", decimal(value(snapshot, Metric::CpuWatts), 1, L" W")}
         });
-        rounded(dc, {left, px(245), right, area.bottom - px(10)}, px(18), theme_->surface, theme_->border);
-        label(dc, boldFont_, L"逻辑处理器", {left + px(12), px(249), right - px(12), px(277)});
+        rounded(dc, {left, px(217), right, area.bottom - px(10)}, px(22), theme_->surface, theme_->border);
+        label(dc, boldFont_, L"逻辑处理器", {left + px(12), px(221), right - px(12), px(249)});
         label(dc, smallFont_, L"功耗取自 CPU 能量计数，读数受平台遥测影响",
-            {left + px(150), px(249), right - px(14), px(277)}, theme_->muted, DT_RIGHT);
+            {left + px(122), px(221), right - px(14), px(249)}, theme_->muted, DT_RIGHT);
         if (details_.cores.empty()) {
-            label(dc, normalFont_, L"暂无逻辑处理器明细。", {left + px(12), px(284), right - px(12), px(314)}, theme_->muted);
+            label(dc, normalFont_, L"暂无逻辑处理器明细。", {left + px(12), px(256), right - px(12), px(286)}, theme_->muted);
         }
     }
 
     void paintGpuDetails(HDC dc, RECT area, const Snapshot* snapshot) const {
         const int left = px(24);
         const int right = area.right - left;
-        label(dc, titleFont_, L"显卡实时详情", {left, px(111), right, px(148)});
-        paintDetailSummary(dc, {left, px(158), right, px(233)}, {
+        label(dc, titleFont_, L"显卡实时详情", {left, px(83), right, px(120)});
+        paintDetailSummary(dc, {left, px(130), right, px(205)}, {
             {L"GPU 占用率", decimal(value(snapshot, Metric::GpuPercent), 1, L"%")},
             {L"GPU 温度", decimal(value(snapshot, Metric::GpuTemp), 0, L" °C")},
             {L"板卡功耗", decimal(value(snapshot, Metric::GpuWatts), 1, L" W")},
             {L"显存已用 / 总量", bytes(value(snapshot, Metric::GpuMemoryUsed)) + L" / " + bytes(value(snapshot, Metric::GpuMemoryTotal))}
         });
-        rounded(dc, {left, px(245), right, px(450)}, px(18), theme_->surface, theme_->border);
-        label(dc, boldFont_, L"时钟与散热", {left + px(12), px(249), right - px(12), px(277)});
+        rounded(dc, {left, px(217), right, px(422)}, px(22), theme_->surface, theme_->border);
+        label(dc, boldFont_, L"时钟与散热", {left + px(12), px(221), right - px(12), px(249)});
         const std::pair<const wchar_t*, std::wstring> fields[] = {
             {L"核心频率", decimal(details_.gpuCoreMhz, 0, L" MHz")},
             {L"显存频率", decimal(details_.gpuMemoryMhz, 0, L" MHz")},
@@ -1324,7 +1660,7 @@ private:
         const int width = (right - left - px(24)) / 2;
         for (int i = 0; i < static_cast<int>(std::size(fields)); ++i) {
             const int x = left + px(12) + (i % 2) * width;
-            const int y = px(284 + 37 * (i / 2));
+            const int y = px(256 + 37 * (i / 2));
             const auto& [title, reading] = fields[i];
             rounded(dc, {x, y, x + width - px(10), y + px(30)}, px(8), theme_->chartBg, theme_->chartBg);
             label(dc, normalFont_, title, {x + px(8), y, x + width / 2, y + px(30)}, theme_->secondary);
@@ -1335,16 +1671,16 @@ private:
     void paintDiskDetails(HDC dc, RECT area) const {
         const int left = px(24);
         const int right = area.right - left;
-        label(dc, titleFont_, L"磁盘 SMART", {left, px(111), right, px(148)});
+        label(dc, titleFont_, L"磁盘 SMART", {left, px(83), right, px(120)});
         label(dc, smallFont_, L"每行对应一块物理磁盘。损耗为设备报告的寿命消耗比例，横线表示暂无读数。",
-            {left, px(148), right, px(177)}, theme_->secondary);
-        rounded(dc, {left, px(177), right, area.bottom - px(10)}, px(18), theme_->surface, theme_->border);
+            {left, px(120), right, px(149)}, theme_->secondary);
+        rounded(dc, {left, px(149), right, area.bottom - px(10)}, px(22), theme_->surface, theme_->border);
         if (details_.disks.empty()) {
             const auto text = details_.pane == DetailPane::Disk ? L"暂无可用磁盘数据。" : L"正在读取磁盘可靠性数据…";
-            label(dc, normalFont_, text, {left + px(12), px(188), right - px(12), px(218)}, theme_->muted);
+            label(dc, normalFont_, text, {left + px(12), px(160), right - px(12), px(190)}, theme_->muted);
             if (callbacks_.startCpu) {
                 label(dc, smallFont_, L"如果一直没有读数，可从托盘菜单启动硬件传感器。",
-                    {left + px(12), px(219), right - px(12), px(244)}, theme_->secondary);
+                    {left + px(12), px(191), right - px(12), px(216)}, theme_->secondary);
             }
             return;
         }
@@ -1359,20 +1695,20 @@ private:
     }
 
     void render(HDC dc, RECT area) const {
-        fill(dc, area, theme_->background);
+        for (auto& tip : rankTips_) tip = {};
+        fill(dc, {0, scroll_, area.right, area.bottom + scroll_}, theme_->background);
         const int pad = px(PageInset);
-        rounded(dc, {pad, px(21), pad + px(35), px(56)}, px(12), theme_->primaryFill, theme_->primaryFill);
-        const POINT pulse[] = {{pad + px(7), px(39)}, {pad + px(12), px(39)},
-            {pad + px(16), px(32)}, {pad + px(21), px(45)}, {pad + px(25), px(38)}, {pad + px(28), px(38)}};
-        if (const auto pen = CreatePen(PS_SOLID, px(2), theme_->brandGlyph)) {
+        line(dc, 0, px(60), area.right, px(60), theme_->border);
+        rounded(dc, {pad, px(20), pad + px(24), px(44)}, px(8), theme_->selectionFill, theme_->selectionFill);
+        const POINT pulse[] = {{pad + px(4), px(32)}, {pad + px(8), px(32)},
+            {pad + px(11), px(27)}, {pad + px(14), px(37)}, {pad + px(17), px(32)}, {pad + px(20), px(32)}};
+        if (const auto pen = CreatePen(PS_SOLID, px(2), theme_->blue)) {
             const auto old = SelectObject(dc, pen);
             Polyline(dc, pulse, static_cast<int>(std::size(pulse)));
             SelectObject(dc, old);
             DeleteObject(pen);
         }
-        const int brand = pad + px(46);
-        label(dc, titleFont_, L"Computer Watch", {brand, px(13), area.right - pad, px(47)});
-        label(dc, smallFont_, L"本机性能与硬件传感器", {brand, px(44), area.right - pad, px(64)}, theme_->secondary);
+        label(dc, titleFont_, L"Computer Watch", {pad + px(34), px(14), pad + px(204), px(50)});
         if (tab_ == Tab::Settings) {
             paintSettings(dc, area);
             return;
@@ -1386,36 +1722,36 @@ private:
         const auto snapshot = history ? (selected_ ? &*selected_ : nullptr) : (live_.empty() ? nullptr : &live_.back());
         std::wstring status;
         COLORREF statusColor = history ? theme_->blue : theme_->green;
-        COLORREF statusFill = history ? theme_->blueTint : theme_->greenTint;
+        const int extra = statusOffset(area);
         if (history) {
-            rounded(dc, {pad, px(106), area.right - pad, px(143)}, px(12), theme_->surface, theme_->border);
-            label(dc, smallFont_, L"查询时间", {pad, px(110), pad + px(64), px(137)}, theme_->secondary);
+            rounded(dc, {pad, px(73) + extra, area.right - pad, px(110) + extra}, px(12), theme_->surface, theme_->border);
+            label(dc, smallFont_, L"查询时间", {pad + px(12), px(78) + extra, pad + px(64), px(105) + extra}, theme_->secondary);
             label(dc, smallFont_, L"点击任意曲线定位采样时刻",
-                {pad + px(465), px(110), area.right - pad, px(137)}, theme_->secondary);
+                {pad + px(465), px(78) + extra, area.right - pad - px(12), px(105) + extra}, theme_->secondary);
             status = historyFailed_ ? L"读取历史失败" :
                 snapshot ? L"历史样本  " + timeText(snapshot->timestampMs, true) : L"该时间附近暂无记录";
         } else if (liveFailed_) {
             status = L"读取采集数据失败";
             statusColor = theme_->amber;
-            statusFill = theme_->amberTint;
         } else if (!snapshot) {
             status = L"等待采集器";
             statusColor = theme_->amber;
-            statusFill = theme_->amberTint;
         } else {
             status = L"最新样本  " + timeText(snapshot->timestampMs);
             if (now - snapshot->timestampMs > 12'000) {
                 status += L"  ·  采集已暂停";
                 statusColor = theme_->amber;
-                statusFill = theme_->amberTint;
             }
         }
         const int badgeRight = area.right - pad;
-        const int badgeLeft = badgeRight - textWidth(dc, smallFont_, status) - px(35);
-        rounded(dc, {badgeLeft, px(26), badgeRight, px(51)}, px(22), statusFill, statusFill);
-        rounded(dc, {badgeLeft + px(10), px(35), badgeLeft + px(16), px(41)}, px(6), statusColor, statusColor);
-        label(dc, smallFont_, status, {badgeLeft + px(22), px(26), badgeRight - px(9), px(51)}, statusColor);
+        const int badgeLeft = extra ? pad : badgeRight - textWidth(dc, smallFont_, status) - px(15);
+        const int statusY = px(extra ? 75 : 32);
+        rounded(dc, {badgeLeft, statusY - px(3), badgeLeft + px(6), statusY + px(3)},
+            px(6), statusColor, statusColor);
+        label(dc, smallFont_, status, {badgeLeft + px(14), statusY - px(13), badgeRight,
+            statusY + px(13)}, theme_->secondary);
 
+        area.bottom = std::max(static_cast<int>(area.bottom), px(390));
         switch (detailPane()) {
         case DetailPane::Cpu: paintCpuDetails(dc, area, snapshot); return;
         case DetailPane::Gpu: paintGpuDetails(dc, area, snapshot); return;
@@ -1426,13 +1762,13 @@ private:
         for (size_t index = 0; index < cards_.size(); ++index) {
             paintCard(dc, index, snapshot, samples, start, end);
         }
-        const int y = cards_[0].bottom + px(27);
+        const int y = cards_.back().bottom + px(30);
         label(dc, smallFont_, history ? timeText(start, true) : L"最近 60 秒",
-            {pad, cards_[0].bottom + 1, area.right / 2, y - 1}, theme_->muted);
+            {pad, cards_.back().bottom + 1, area.right / 2, y - 1}, theme_->muted);
         label(dc, smallFont_, history ? timeText(end, true) : L"当前",
-            {area.right / 2, cards_[0].bottom + 1, area.right - pad, y - 1}, theme_->muted, DT_RIGHT);
-        paintRanks(dc, rankPanel(area, 0), L"CPU 占用前 10", snapshot ? &snapshot->byCpu : nullptr, rankSorts_[0], theme_->blue);
-        paintRanks(dc, rankPanel(area, 1), L"内存占用前 10", snapshot ? &snapshot->byMemory : nullptr, rankSorts_[1], theme_->teal);
+            {area.right / 2, cards_.back().bottom + 1, area.right - pad, y - 1}, theme_->muted, DT_RIGHT);
+        paintRanks(dc, rankPanel(area, 0), L"CPU 占用前 10", snapshot ? &snapshot->byCpu : nullptr, rankSorts_[0], 0);
+        paintRanks(dc, rankPanel(area, 1), L"内存占用前 10", snapshot ? &snapshot->byMemory : nullptr, rankSorts_[1], 1);
     }
 
     void paint() const {
@@ -1445,11 +1781,16 @@ private:
             const auto bitmap = CreateCompatibleBitmap(dc, area.right, area.bottom);
             if (buffer && bitmap) {
                 const auto old = SelectObject(buffer, bitmap);
+                SetViewportOrgEx(buffer, 0, -scroll_, nullptr);
                 render(buffer, area);
+                SetViewportOrgEx(buffer, 0, 0, nullptr);
                 BitBlt(dc, 0, 0, area.right, area.bottom, buffer, 0, 0, SRCCOPY);
                 SelectObject(buffer, old);
             } else {
+                const int saved = SaveDC(dc);
+                SetViewportOrgEx(dc, 0, -scroll_, nullptr);
                 render(dc, area);
+                RestoreDC(dc, saved);
             }
             if (bitmap) {
                 DeleteObject(bitmap);
@@ -1467,7 +1808,11 @@ private:
     HWND picker_{}, rangeCombo_{}, queryButton_{}, retentionEdit_{}, saveButton_{};
     HWND lightThemeButton_{}, darkThemeButton_{};
     HWND cpuDetailButton_{}, gpuDetailButton_{}, diskDetailButton_{}, detailBackButton_{};
-    HWND coreList_{}, diskList_{};
+    HWND coreList_{}, diskList_{}, rankTooltip_{};
+    struct RankTip { RECT bounds{}; std::wstring text; };
+    mutable std::array<RankTip, 2 * TopCount> rankTips_{};
+    POINT cursor_{-1, -1};
+    std::wstring tooltipText_;
     std::array<HWND, 4> sortButtons_{};
     HFONT normalFont_{}, smallFont_{}, titleFont_{}, valueFont_{}, boldFont_{};
     HBRUSH surfaceBrush_{};
@@ -1477,6 +1822,7 @@ private:
     UINT taskbarCreated_{};
     bool trayAdded_{}, trayV4_{};
     int dpi_ = 96;
+    int scroll_{}, scrollMax_{}, wheelDelta_{};
     Tab tab_ = Tab::Live;
     DetailPane requestedDetail_ = DetailPane::None;
     HardwareDetails details_;

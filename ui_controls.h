@@ -58,27 +58,27 @@ inline constexpr Palette LightPalette{
 };
 
 inline constexpr Palette DarkPalette{
-    .background = RGB(14, 23, 40),
-    .surface = RGB(23, 36, 58),
-    .border = RGB(90, 111, 141),
-    .ink = RGB(236, 242, 251),
-    .secondary = RGB(182, 196, 217),
-    .muted = RGB(154, 173, 200),
-    .grid = RGB(50, 69, 97),
-    .chartBg = RGB(17, 29, 49),
-    .blue = RGB(143, 177, 255),
-    .teal = RGB(113, 224, 204),
+    .background = RGB(15, 17, 23),
+    .surface = RGB(24, 28, 36),
+    .border = RGB(37, 43, 54),
+    .ink = RGB(230, 234, 240),
+    .secondary = RGB(168, 177, 192),
+    .muted = RGB(146, 158, 176),
+    .grid = RGB(43, 50, 64),
+    .chartBg = RGB(24, 28, 36),
+    .blue = RGB(154, 176, 255),
+    .teal = RGB(104, 203, 190),
     .amber = RGB(255, 207, 128),
     .green = RGB(136, 220, 173),
-    .blueTint = RGB(30, 54, 95),
+    .blueTint = RGB(32, 43, 67),
     .greenTint = RGB(23, 61, 52),
     .amberTint = RGB(72, 51, 33),
-    .cardColors = {RGB(143, 177, 255), RGB(113, 224, 204), RGB(131, 201, 248), RGB(202, 164, 255), RGB(118, 203, 214)},
+    .cardColors = {RGB(124, 156, 255), RGB(124, 156, 255), RGB(124, 156, 255), RGB(124, 156, 255), RGB(124, 156, 255)},
     .brandGlyph = RGB(255, 255, 255),
-    .primaryFill = RGB(44, 85, 184),
-    .primaryPressed = RGB(37, 72, 157),
-    .selectionFill = RGB(32, 55, 98),
-    .pressedFill = RGB(38, 67, 112),
+    .primaryFill = RGB(56, 87, 168),
+    .primaryPressed = RGB(48, 74, 146),
+    .selectionFill = RGB(37, 47, 71),
+    .pressedFill = RGB(48, 62, 93),
 };
 
 inline constexpr const Palette& palette(bool dark) {
@@ -172,11 +172,14 @@ inline Colors buttonColors(ButtonKind kind, bool selected, UINT state, bool cont
         colors.border = colors.fill;
         colors.text = theme.brandGlyph;
         colors.focus = theme.brandGlyph;
+    } else if (kind == ButtonKind::Sort && selected && !pressed && !hot) {
+        colors.text = theme.blue;
     } else if (selected || pressed || hot) {
         colors.fill = pressed ? theme.pressedFill : theme.selectionFill;
         colors.border = colors.fill;
         colors.text = theme.blue;
     } else if (kind == ButtonKind::Action) {
+        colors.fill = theme.chartBg;
         colors.border = theme.border;
     }
     if ((state & ODS_DEFAULT) && !primary) {
