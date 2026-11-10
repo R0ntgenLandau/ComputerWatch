@@ -540,7 +540,7 @@ struct ProcessInformation {
 
 static_assert(offsetof(ProcessInformation, imageName) == offsetof(SYSTEM_PROCESS_INFORMATION, ImageName));
 static_assert(offsetof(ProcessInformation, pid) == offsetof(SYSTEM_PROCESS_INFORMATION, UniqueProcessId));
-static_assert(sizeof(void*) == 8 && offsetof(ProcessInformation, workingSetSize) == 144);
+static_assert(offsetof(ProcessInformation, workingSetSize) == (sizeof(void*) == 8 ? 144 : 104));
 
 class Processes {
     using Query = NTSTATUS (NTAPI*)(SYSTEM_INFORMATION_CLASS, PVOID, ULONG, PULONG);
