@@ -28,3 +28,9 @@ Computer Watch 是一款在 Windows 本机运行的桌面监控工具。面板�
 ## 从源码构建
 
 在项目根目录运行 `./build.ps1`，默认使用 PATH 中的 MinGW-w64 GCC 和 windres 生成 x64 版本。三架构打包需要额外提供 LLVM-MinGW，命令及安装包结构见 [发布包说明](package/README.md)。
+
+## 贡献和许可证
+
+欢迎通过 [Issues](https://github.com/R0ntgenLandau/ComputerWatch/issues) 报告问题，或提交 Pull Request。报告问题时请注明 Windows 版本、系统架构、Computer Watch 版本和复现步骤。提交改动前请查阅 [项目约定](AGENTS.md)。
+
+Computer Watch 自有代码采用 [GPL-3.0-only](LICENSE)。第三方组件保留各自的许可证，详见 [第三方组件说明](THIRD-PARTY-NOTICES.md)。

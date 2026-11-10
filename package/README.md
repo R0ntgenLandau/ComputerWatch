@@ -10,4 +10,6 @@
 
 CPU 封装温度与功耗依赖兼容的 Intel 处理器和 PawnIO。ARM64 设备没有这组 Intel 读数。NVIDIA GPU 读数取决于对应架构的 NVML。缺失读数在界面中显示为缺失。
 
-从源码打包时，在项目根目录运行 `./package.ps1 -LlvmMingw <已解压的 LLVM-MinGW 工具链目录>`。x64 使用 PATH 中的 MinGW-w64 GCC 和 windres，x86 和 ARM64 使用指定的 LLVM-MinGW。生成的 ZIP 位于 `package/`，远程下载请使用 GitHub Releases。
+从源码打包时，在项目根目录运行 `./package.ps1 -LlvmMingw <已解压的 LLVM-MinGW 工具链目录>`。x64 使用 PATH 中的 MSYS2 UCRT64 GCC 和 windres 及其许可文件，x86 和 ARM64 使用指定的 LLVM-MinGW。生成的 ZIP 位于 `package/`，远程下载请使用 GitHub Releases。
+
+发布包随附 GPL-3.0 项目许可证、第三方许可和 IntelMSR 对应源码。项目源码可从 GitHub Release 的 Source code 下载。
