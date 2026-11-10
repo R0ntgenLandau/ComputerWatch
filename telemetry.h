@@ -1,0 +1,36 @@
+#pragma once
+
+#include "common.h"
+
+#include <memory>
+#include <utility>
+
+namespace cw {
+
+class Telemetry {
+public:
+    Telemetry();
+    ~Telemetry();
+
+    Snapshot sample();
+    HardwareDetails details(DetailPane pane);
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+class CpuSensors {
+public:
+    CpuSensors();
+    ~CpuSensors();
+
+    // CPU package temperature (°C), then average CPU package power (W).
+    std::pair<double, double> sample();
+
+private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+
+}  // namespace cw
