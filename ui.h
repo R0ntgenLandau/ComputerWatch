@@ -21,6 +21,8 @@ struct UiCallbacks {
     std::function<void()> startCpu;
     std::function<HardwareDetails()> details;
     std::function<void(DetailPane)> selectDetail;
+    std::function<bool()> darkMode;
+    std::function<bool(bool)> setDarkMode;
 };
 
 int runUi(HINSTANCE instance, bool startVisible, UiCallbacks callbacks);

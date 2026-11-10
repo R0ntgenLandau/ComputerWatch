@@ -29,8 +29,31 @@ using namespace std::chrono_literals;
 
 constexpr auto DashboardClass = L"ComputerWatchDashboard";
 constexpr auto UiMutexName = L"Local\\ComputerWatch.Dashboard.1";
+constexpr auto PreferencesKey = L"Software\\ComputerWatch";
+constexpr auto DarkModeValue = L"DarkMode";
 constexpr auto MinuteMs = 60000;
 constexpr std::int64_t DayMs = 86400000;
+
+bool readDarkMode() {
+    DWORD value = 0;
+    DWORD size = sizeof(value);
+    return RegGetValueW(HKEY_CURRENT_USER, PreferencesKey, DarkModeValue, RRF_RT_REG_DWORD,
+                        nullptr, &value, &size) == ERROR_SUCCESS &&
+        size == sizeof(value) && value == 1;
+}
+
+bool writeDarkMode(bool darkMode) {
+    HKEY key = nullptr;
+    if (RegCreateKeyExW(HKEY_CURRENT_USER, PreferencesKey, 0, nullptr, REG_OPTION_NON_VOLATILE,
+                        KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
+        return false;
+    }
+    const DWORD value = darkMode ? 1 : 0;
+    const auto result = RegSetValueExW(key, DarkModeValue, 0, REG_DWORD,
+                                       reinterpret_cast<const BYTE*>(&value), sizeof(value));
+    RegCloseKey(key);
+    return result == ERROR_SUCCESS;
+}
 
 class Handle {
 public:
@@ -487,6 +510,8 @@ int run(HINSTANCE instance, std::wstring_view arguments) {
     callbacks.startCpu = startCpuHelper;
     callbacks.details = [&] { return collector.hardwareDetails(); };
     callbacks.selectDetail = [&](DetailPane pane) { collector.selectDetail(pane); };
+    callbacks.darkMode = readDarkMode;
+    callbacks.setDarkMode = writeDarkMode;
 
     if (startVisible) startCpuHelper();
     return runUi(instance, startVisible, std::move(callbacks));
