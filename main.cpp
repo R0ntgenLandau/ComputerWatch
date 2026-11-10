@@ -352,6 +352,11 @@ public:
         return {recent_.begin(), recent_.end()};
     }
 
+    std::optional<HardwareInventory> inventory() {
+        std::scoped_lock lock(mutex_);
+        return inventory_;
+    }
+
     void setVisible(bool visible) {
         {
             std::scoped_lock lock(mutex_);
@@ -394,11 +399,18 @@ private:
         while (!stop.stop_requested()) {
             const auto started = steady_clock::now();
             DetailPane detailPane;
+            bool readInventory;
             std::uint64_t revision;
             {
                 std::scoped_lock lock(mutex_);
                 detailPane = visible_ ? detailPane_ : DetailPane::None;
+                readInventory = visible_ && !inventory_;
                 revision = modeRevision_;
+            }
+            if (readInventory) {
+                auto inventory = telemetry.inventory();
+                std::scoped_lock lock(mutex_);
+                inventory_ = std::move(inventory);
             }
             auto sample = telemetry.sample();
             sample.timestampMs = timeMs();
@@ -458,6 +470,7 @@ private:
     bool visible_;
     DetailPane detailPane_ = DetailPane::None;
     HardwareDetails hardwareDetails_;
+    std::optional<HardwareInventory> inventory_;
     std::uint64_t modeRevision_{};
     std::deque<Snapshot> recent_;
     std::jthread worker_;
@@ -499,6 +512,7 @@ int run(HINSTANCE instance, std::wstring_view arguments) {
 
     UiCallbacks callbacks;
     callbacks.live = [&] { return collector.live(); };
+    callbacks.inventory = [&] { return collector.inventory(); };
     callbacks.series = [&](std::int64_t from, std::int64_t to, std::size_t maximum) {
         return openHistory().series(from, to, maximum);
     };

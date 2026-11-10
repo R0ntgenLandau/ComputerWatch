@@ -42,6 +42,11 @@ struct DiskDetail {
     std::wstring note;
 };
 
+struct HardwareInventory {
+    std::vector<std::wstring> processors, memory, disks, graphics;
+    std::wstring sampledGpu;
+};
+
 struct HardwareDetails {
     DetailPane pane = DetailPane::None;
     std::vector<CoreDetail> cores;

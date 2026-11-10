@@ -12,6 +12,7 @@ public:
     Telemetry();
     ~Telemetry();
 
+    HardwareInventory inventory() const;
     Snapshot sample();
     HardwareDetails details(DetailPane pane);
 

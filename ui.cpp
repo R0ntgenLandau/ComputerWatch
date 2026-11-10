@@ -40,6 +40,8 @@ constexpr int CardInset = 16;
 constexpr int ModuleGap = 14;
 constexpr int CardHeight = 236;
 constexpr int CardTools = 128;
+constexpr int MemoryModelRowHeight = 19;
+constexpr int HardwareModelRowHeight = 32;
 constexpr int RankHeight = 314;
 constexpr int RankInset = 14;
 constexpr int RankCpuWidth = 72;
@@ -248,7 +250,7 @@ public:
         dpi_ = static_cast<int>(GetDpiForSystem());
         window_ = CreateWindowExW(WS_EX_CONTROLPARENT, WindowClass, L"Computer Watch · 电脑监控",
             WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VSCROLL, CW_USEDEFAULT, CW_USEDEFAULT,
-            px(1150), px(720), nullptr, nullptr, instance_, this);
+            px(1150), px(855), nullptr, nullptr, instance_, this);
         if (!window_) {
             return false;
         }
@@ -630,6 +632,26 @@ private:
         return area.right < px(755) ? px(22) : 0;
     }
 
+    const std::vector<std::wstring>& modelList(size_t card) const {
+        const auto& inventory = *inventory_;
+        const std::array lists{&inventory.processors, &inventory.memory, &inventory.disks, &inventory.graphics};
+        return *lists[card];
+    }
+
+    bool showGpuScope() const {
+        return inventory_ && !inventory_->sampledGpu.empty() &&
+            (inventory_->graphics.size() != 1 || inventory_->graphics.front() != inventory_->sampledGpu);
+    }
+
+    int modelHeight() const {
+        if (tab_ != Tab::Live) return 0;
+        const auto height = inventory_ ? std::max({size_t{HardwareModelRowHeight},
+            inventory_->processors.size() * HardwareModelRowHeight,
+            inventory_->memory.size() * MemoryModelRowHeight, inventory_->disks.size() * HardwareModelRowHeight,
+            inventory_->graphics.size() * HardwareModelRowHeight}) : HardwareModelRowHeight;
+        return 26 + static_cast<int>(height);
+    }
+
     void layout() {
         RECT area{};
         GetClientRect(window_, &area);
@@ -646,12 +668,13 @@ private:
         const int contentWidth = static_cast<int>(area.right) - 2 * pad - (columns - 1) * gap;
         const int extra = statusOffset(area);
         const int cardY = px(tab_ == Tab::History ? 126 : 76) + extra;
+        const int cardHeight = CardHeight + modelHeight();
         for (size_t i = 0; i < cards_.size(); ++i) {
             const int column = static_cast<int>(i) % columns;
-            const int y = cardY + static_cast<int>(i) / columns * px(CardHeight + ModuleGap);
+            const int y = cardY + static_cast<int>(i) / columns * px(cardHeight + ModuleGap);
             const int x = pad + column * gap + contentWidth * column / columns;
             const int right = pad + column * gap + contentWidth * (column + 1) / columns;
-            cards_[i] = {x, y, right, y + px(CardHeight)};
+            cards_[i] = {x, y, right, y + px(cardHeight)};
         }
         const auto detail = detailPane();
         const bool inDetail = detail != DetailPane::None;
@@ -873,6 +896,10 @@ private:
     }
 
     void refreshLive() {
+        if (!inventory_ && callbacks_.inventory) {
+            inventory_ = callbacks_.inventory();
+            if (inventory_ && tab_ == Tab::Live) layout();
+        }
         try {
             live_ = callbacks_.live ? callbacks_.live() : std::vector<Snapshot>{};
             liveFailed_ = false;
@@ -980,7 +1007,7 @@ private:
     }
 
     RECT chartRect(const RECT& card) const {
-        return {card.left + px(CardInset), card.top + px(151), card.right - px(CardInset), card.bottom - px(CardInset)};
+        return {card.left + px(CardInset), card.top + px(151), card.right - px(CardInset), card.top + px(CardHeight - CardInset)};
     }
 
     RECT chartPlot(RECT area) const {
@@ -1242,7 +1269,10 @@ private:
             if (notification->hwndFrom == rankTooltip_ && notification->code == TTN_GETDISPINFOW) {
                 const auto tip = std::find_if(rankTips_.begin(), rankTips_.end(),
                     [&](const RankTip& entry) { return PtInRect(&entry.bounds, cursor_); });
-                tooltipText_ = tip == rankTips_.end() ? L"" : tip->text;
+                const auto model = std::find_if(modelTips_.begin(), modelTips_.end(),
+                    [&](const ModelTip& entry) { return PtInRect(&entry.bounds, cursor_); });
+                tooltipText_ = model != modelTips_.end() ? *model->text :
+                    tip == rankTips_.end() ? L"" : tip->text;
                 reinterpret_cast<NMTTDISPINFOW*>(lParam)->lpszText = tooltipText_.data();
                 return 0;
             }
@@ -1267,6 +1297,12 @@ private:
                 if (PtInRect(&tip.bounds, position) != PtInRect(&tip.bounds, cursor_)) {
                     SendMessageW(rankTooltip_, TTM_POP, 0, 0);
                     invalidate();
+                    break;
+                }
+            }
+            for (const auto& tip : modelTips_) {
+                if (PtInRect(&tip.bounds, position) != PtInRect(&tip.bounds, cursor_)) {
+                    SendMessageW(rankTooltip_, TTM_POP, 0, 0);
                     break;
                 }
             }
@@ -1460,7 +1496,9 @@ private:
         rounded(dc, card, px(22), theme_->surface, theme_->border);
         static constexpr std::array metricNames{L"处理器占用率", L"内存占用率", L"已用容量", L"显卡占用率", L"下载速率"};
         label(dc, boldFont_, names[index], {left, card.top + px(12), right, card.top + px(36)});
-        label(dc, smallFont_, metricNames[index], {left, card.top + px(39), right, card.top + px(57)}, theme_->muted);
+        const auto metricName = index == 3 && tab_ == Tab::Live && showGpuScope()
+            ? L"占用率 · NVML 0" : metricNames[index];
+        label(dc, smallFont_, metricName, {left, card.top + px(39), right, card.top + px(57)}, theme_->muted);
         std::wstring primary;
         std::wstring detail;
         std::wstring firstLegend;
@@ -1516,6 +1554,40 @@ private:
             legend(left, right, firstLegend, accent);
         }
         paintChart(dc, chartRect(card), chartFor(index), samples, start, end, accent);
+        if (tab_ == Tab::Live && index < 4) paintModels(dc, index, card);
+    }
+
+    void paintModels(HDC dc, size_t index, RECT card) const {
+        const int left = card.left + px(CardInset);
+        const int right = card.right - px(CardInset);
+        const int top = card.top + px(CardHeight - 4);
+        line(dc, left, top, right, top, theme_->border);
+        label(dc, smallFont_, L"硬件型号", {left, top + px(5), right, top + px(24)}, theme_->muted);
+        const int height = index == 1 ? MemoryModelRowHeight : HardwareModelRowHeight;
+        RECT row{left, top + px(25), right, top + px(25 + height)};
+        if (!inventory_ || modelList(index).empty()) {
+            label(dc, smallFont_, inventory_ ? L"型号未提供" : L"正在读取…", row, theme_->secondary);
+            return;
+        }
+        int rowIndex = 0;
+        for (const auto& model : modelList(index)) {
+            row.top = top + px(25 + rowIndex * height);
+            row.bottom = top + px(25 + (++rowIndex) * height);
+            std::wstring_view display = model;
+            if (index == 1 && display.starts_with(L"DIMM_")) display.remove_prefix(5);
+            const bool wraps = textWidth(dc, smallFont_, display) > right - left;
+            if (wraps && index != 1) paragraph(dc, smallFont_, display, row, theme_->ink);
+            else {
+                auto caption = row;
+                caption.bottom = caption.top + px(MemoryModelRowHeight);
+                label(dc, smallFont_, display, caption, theme_->ink);
+            }
+            if (wraps || display.size() != model.size()) modelTips_.push_back({row, &model});
+        }
+        if (index == 3 && showGpuScope()) {
+            const RECT scope{left, card.top + px(39), right, card.top + px(57)};
+            modelTips_.push_back({scope, &inventory_->sampledGpu});
+        }
     }
 
     void paintRanks(HDC dc, RECT panel, const wchar_t* title,
@@ -1701,6 +1773,7 @@ private:
 
     void render(HDC dc, RECT area) const {
         for (auto& tip : rankTips_) tip = {};
+        modelTips_.clear();
         fill(dc, {0, scroll_, area.right, area.bottom + scroll_}, theme_->background);
         const int pad = px(PageInset);
         line(dc, 0, px(60), area.right, px(60), theme_->border);
@@ -1809,6 +1882,9 @@ private:
     HWND coreList_{}, diskList_{}, rankTooltip_{};
     struct RankTip { RECT bounds{}; std::wstring text; };
     mutable std::array<RankTip, 2 * TopCount> rankTips_{};
+    struct ModelTip { RECT bounds; const std::wstring* text; };
+    mutable std::vector<ModelTip> modelTips_;
+    std::optional<HardwareInventory> inventory_;
     POINT cursor_{-1, -1};
     std::wstring tooltipText_;
     std::array<HWND, 4> sortButtons_{};

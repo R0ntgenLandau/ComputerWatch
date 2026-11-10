@@ -294,6 +294,18 @@ DiskDetail readDrive(unsigned number, std::stop_token stop) {
 
 } // namespace
 
+std::vector<std::wstring> readDiskModels() {
+    std::vector<std::wstring> models;
+    for (const unsigned number : physicalDrives()) {
+        const auto index = std::to_wstring(number);
+        const DriveHandle drive(LR"(\\.\PhysicalDrive)" + index, 0);
+        DiskDetail disk;
+        if (drive) identifyDrive(drive.get(), disk);
+        models.push_back(L"磁盘 " + index + L" · " + (disk.name.empty() ? L"型号未提供" : disk.name));
+    }
+    return models;
+}
+
 std::vector<DiskDetail> readDiskSmart(std::stop_token stop) {
     const auto numbers = physicalDrives();
     std::vector<DiskDetail> result;

@@ -9,11 +9,14 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <iphlpapi.h>
+#include <setupapi.h>
+#include <cfgmgr32.h>
 #include <pdh.h>
 #include <pdhmsg.h>
 #include <winternl.h>
 
 #include "telemetry.h"
+#include "disk_smart.h"
 
 #include <algorithm>
 #include <bit>
@@ -21,9 +24,11 @@
 #include <cstddef>
 #include <cstdint>
 #include <cwchar>
+#include <cstring>
 #include <limits>
 #include <set>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -37,6 +42,107 @@ constexpr double missing = std::numeric_limits<double>::quiet_NaN();
 template <typename Function>
 Function resolve(HMODULE module, const char* name) {
     return std::bit_cast<Function>(GetProcAddress(module, name));
+}
+
+// The firmware strings are byte sequences. Accept UTF-8 and retain legacy
+// manufacturer strings reported in the Windows system code page.
+std::wstring modelText(std::string_view raw) {
+    const auto first = raw.find_first_not_of(" \t");
+    if (first == std::string_view::npos) return {};
+    raw = raw.substr(first, raw.find_last_not_of(" \t") - first + 1);
+    const int length = static_cast<int>(raw.size());
+    UINT codepage = CP_UTF8;
+    int count = MultiByteToWideChar(codepage, MB_ERR_INVALID_CHARS, raw.data(), length, nullptr, 0);
+    if (!count) {
+        codepage = CP_ACP;
+        count = MultiByteToWideChar(codepage, 0, raw.data(), length, nullptr, 0);
+    }
+    std::wstring text(count, L'\0');
+    if (count) MultiByteToWideChar(codepage, 0, raw.data(), length, text.data(), count);
+    return text;
+}
+
+std::wstring firmwareString(const BYTE* first, const BYTE* end, unsigned index) {
+    if (!index) return {};
+    while (first < end) {
+        const auto* terminator = std::find(first, end, 0);
+        if (--index == 0)
+            return modelText({reinterpret_cast<const char*>(first), static_cast<size_t>(terminator - first)});
+        first = terminator == end ? end : terminator + 1;
+    }
+    return {};
+}
+
+void readFirmwareModels(HardwareInventory& inventory) {
+    constexpr DWORD rawSmbios = 0x52534D42; // RSMB
+    constexpr UINT headerSize = 8;
+    const UINT size = GetSystemFirmwareTable(rawSmbios, 0, nullptr, 0);
+    if (size < headerSize || size > 16 * 1024 * 1024) return;
+    std::vector<BYTE> bytes(size);
+    if (GetSystemFirmwareTable(rawSmbios, 0, bytes.data(), size) != size) return;
+    DWORD length{};
+    std::memcpy(&length, bytes.data() + 4, sizeof(length));
+    if (length > size - headerSize) return;
+
+    const auto* entry = bytes.data() + headerSize;
+    const auto* end = entry + length;
+    while (end - entry >= 4 && entry[0] != 127) {
+        const auto type = entry[0];
+        const auto formattedLength = entry[1];
+        if (formattedLength < 4 || end - entry < formattedLength + 2) break;
+        const auto* strings = entry + formattedLength;
+        const auto* last = strings;
+        while (end - last >= 2 && (last[0] || last[1])) ++last;
+        if (end - last < 2) break;
+
+        // Type 4: Socket Populated, Processor Version. Type 17: Size,
+        // Device Locator and Part Number. Size zero is an empty slot.
+        if (type == 4 && formattedLength > 0x18 && (entry[0x18] & 0x40)) {
+            inventory.processors.push_back(firmwareString(strings, last, entry[0x10]));
+        } else if (type == 17 && formattedLength > 0x0d && (entry[0x0c] || entry[0x0d])) {
+            auto slot = formattedLength > 0x10 ? firmwareString(strings, last, entry[0x10]) : std::wstring{};
+            const auto model = formattedLength > 0x1a ? firmwareString(strings, last, entry[0x1a]) : std::wstring{};
+            if (slot.empty()) slot = L"内存 " + std::to_wstring(inventory.memory.size() + 1);
+            inventory.memory.push_back(slot + L" · " + (model.empty() ? L"型号未提供" : model));
+        }
+        entry = last + 2;
+    }
+}
+
+std::wstring windowsProcessorName() {
+    wchar_t name[256]{};
+    DWORD size = sizeof(name);
+    if (RegGetValueW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
+        L"ProcessorNameString", RRF_RT_REG_SZ, nullptr, name, &size) != ERROR_SUCCESS) return {};
+    return name;
+}
+
+std::vector<std::wstring> graphicsModels() {
+    // GUID_DEVCLASS_DISPLAY. One PnP instance per adapter, including headless devices.
+    constexpr GUID displayClass{0x4d36e968, 0xe325, 0x11ce, {0xbf, 0xc1, 0x08, 0x00, 0x2b, 0xe1, 0x03, 0x18}};
+    const auto devices = SetupDiGetClassDevsW(&displayClass, nullptr, nullptr, DIGCF_PRESENT);
+    std::vector<std::wstring> models;
+    if (devices == INVALID_HANDLE_VALUE) return models;
+    const auto destroy = [](void* value) { SetupDiDestroyDeviceInfoList(value); };
+    const std::unique_ptr<void, decltype(destroy)> guard(devices, destroy);
+    for (DWORD index = 0; ; ++index) {
+        SP_DEVINFO_DATA device{};
+        device.cbSize = sizeof(device);
+        if (!SetupDiEnumDeviceInfo(devices, index, &device)) break;
+        wchar_t instance[MAX_DEVICE_ID_LEN]{};
+        if (!SetupDiGetDeviceInstanceIdW(devices, &device, instance, std::size(instance), nullptr)) continue;
+        const std::wstring_view id(instance);
+        if (id.starts_with(L"ROOT\\") || id.starts_with(L"SWD\\")) continue;
+
+        wchar_t name[256]{};
+        const auto read = [&](DWORD property) {
+            return SetupDiGetDeviceRegistryPropertyW(devices, &device, property, nullptr,
+                reinterpret_cast<BYTE*>(name), sizeof(name), nullptr) && name[0];
+        };
+        if (read(SPDRP_FRIENDLYNAME) || read(SPDRP_DEVICEDESC)) models.emplace_back(name);
+        else models.push_back(L"型号未提供");
+    }
+    return models;
 }
 
 uint64_t ticks(const FILETIME& time) {
@@ -195,6 +301,16 @@ public:
         getThrottleReasons_ = resolve<GetClockReasons>(module_, "nvmlDeviceGetCurrentClocksThrottleReasons");
         getDeviceCount_ = resolve<GetDeviceCount>(module_, "nvmlDeviceGetCount_v2");
         getArchitecture_ = resolve<GetArchitecture>(module_, "nvmlDeviceGetArchitecture");
+    }
+
+    std::wstring model() const {
+        if (!device_) return {};
+        using GetName = int (*)(Device, char*, unsigned int);
+        const auto getName = resolve<GetName>(module_, "nvmlDeviceGetName");
+        char name[256]{};
+        if (!getName || getName(device_, name, sizeof(name)) != 0) return {};
+        name[sizeof(name) - 1] = 0;
+        return modelText(name);
     }
 
     ~NvidiaGpu() {
@@ -595,6 +711,22 @@ private:
 }  // namespace
 
 struct Telemetry::Impl {
+    HardwareInventory inventory() const {
+        HardwareInventory result;
+        readFirmwareModels(result);
+        if (result.processors.empty()) result.processors.push_back(windowsProcessorName());
+        else if (result.processors.front().empty()) result.processors.front() = windowsProcessorName();
+        for (auto& name : result.processors) if (name.empty()) name = L"型号未提供";
+
+        result.disks = readDiskModels();
+        result.graphics = graphicsModels();
+        result.sampledGpu = gpu.model();
+        if (result.graphics.empty() && !result.sampledGpu.empty()) {
+            result.graphics.push_back(result.sampledGpu);
+        }
+        return result;
+    }
+
     Snapshot sample() {
         Snapshot snapshot{};
         snapshot.timestampMs = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -790,6 +922,7 @@ struct CpuSensors::Impl {
 Telemetry::Telemetry() : impl_(std::make_unique<Impl>()) {}
 Telemetry::~Telemetry() = default;
 Snapshot Telemetry::sample() { return impl_->sample(); }
+HardwareInventory Telemetry::inventory() const { return impl_->inventory(); }
 HardwareDetails Telemetry::details(DetailPane pane) { return impl_->details(pane); }
 
 CpuSensors::CpuSensors() : impl_(std::make_unique<Impl>()) {}

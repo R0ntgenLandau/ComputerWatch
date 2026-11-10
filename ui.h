@@ -12,6 +12,7 @@ namespace cw {
 
 struct UiCallbacks {
     std::function<std::vector<Snapshot>()> live;
+    std::function<std::optional<HardwareInventory>()> inventory;
     std::function<std::vector<Snapshot>(int64_t, int64_t, size_t)> series;
     std::function<std::optional<Snapshot>(int64_t)> at;
     std::function<int()> retention;
