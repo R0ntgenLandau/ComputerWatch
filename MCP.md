@@ -2,6 +2,8 @@
 
 MCP 客户端通过本机 stdio 按需启动服务。服务以当前 Windows 用户的权限只读访问 `%LOCALAPPDATA%\ComputerWatch\history.db`，需要 Computer Watch 已经保存过采样。
 
+在 Computer Watch 的「设置 → MCP 客户端接入」中点击「复制客户端配置」，即可获得指向当前程序旁服务脚本的配置。若客户端的 PATH 中没有 uv，请将配置中的 `uv` 改为其绝对路径。
+
 先安装 uv，并在 PowerShell 中运行 `(Get-Command uv.exe).Source` 获取其绝对路径。将以下配置合并到支持 `mcpServers` 的客户端配置中，按实际位置替换两个路径。客户端需使用运行 Computer Watch 的同一 Windows 用户，并保留该用户的 `LOCALAPPDATA`。首次启动时 uv 会准备 Python 3.11+ 和 MCP SDK。
 
 ```json

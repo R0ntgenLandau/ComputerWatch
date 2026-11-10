@@ -12,6 +12,7 @@
 #include <chrono>
 #include <cmath>
 #include <cwchar>
+#include <filesystem>
 #include <initializer_list>
 #include <string>
 #include <string_view>
@@ -36,6 +37,7 @@ constexpr int64_t EpochOffset = 116'444'736'000'000'000;
 constexpr std::array<int64_t, 4> Ranges{MinuteMs, HourMs, DayMs, 7 * DayMs};
 
 constexpr int PageInset = 24;
+constexpr int McpCardBottom = 502;
 constexpr int CardInset = 16;
 constexpr int ModuleGap = 14;
 constexpr int CardHeight = 236;
@@ -70,7 +72,7 @@ enum ControlId {
     LiveButton = 100, HistoryButton, SettingsButton, CpuCombo, GpuCombo,
     HistoryPicker, RangeCombo, QueryButton, RetentionEdit, SaveButton,
     CpuDetailButton, GpuDetailButton, DiskDetailButton, DetailBackButton, CoreList, DiskList,
-    LeftSortCpu, LeftSortMemory, RightSortCpu, RightSortMemory, LightThemeButton, DarkThemeButton
+    LeftSortCpu, LeftSortMemory, RightSortCpu, RightSortMemory, LightThemeButton, DarkThemeButton, CopyMcpButton
 };
 
 const wchar_t* buttonCaption(unsigned id) {
@@ -86,6 +88,7 @@ const wchar_t* buttonCaption(unsigned id) {
     case SaveButton: return L"保存";
     case LightThemeButton: return L"浅色";
     case DarkThemeButton: return L"深色";
+    case CopyMcpButton: return L"复制客户端配置";
     default: return nullptr;
     }
 }
@@ -500,7 +503,7 @@ private:
         boldFont_ = font(15, FW_SEMIBOLD);
         for (const auto child : {liveButton_, historyButton_, settingsButton_, cpuCombo_, gpuCombo_, rangeCombo_,
             cpuDetailButton_, gpuDetailButton_, diskDetailButton_, detailBackButton_, picker_, queryButton_,
-            retentionEdit_, saveButton_, lightThemeButton_, darkThemeButton_, coreList_, diskList_}) {
+            retentionEdit_, saveButton_, lightThemeButton_, darkThemeButton_, copyMcpButton_, coreList_, diskList_}) {
             if (child) SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(normalFont_), TRUE);
         }
         for (const auto child : sortButtons_) {
@@ -532,6 +535,7 @@ private:
         saveButton_ = button(SaveButton);
         lightThemeButton_ = button(LightThemeButton);
         darkThemeButton_ = button(DarkThemeButton);
+        copyMcpButton_ = button(CopyMcpButton);
         for (int i = 0; i < static_cast<int>(sortButtons_.size()); ++i) {
             sortButtons_[i] = control(WC_BUTTONW, L"", BS_OWNERDRAW, LeftSortCpu + i);
             styleControl(sortButtons_[i]);
@@ -683,7 +687,7 @@ private:
         const bool settings = tab_ == Tab::Settings;
         const bool overview = live || history;
         const int contentBottom = overview ? rankPanel(area, 1).bottom + pad :
-            px(settings ? 390 : detail == DetailPane::Gpu ? 446 : 390);
+            px(settings ? McpCardBottom + PageInset : detail == DetailPane::Gpu ? 446 : 390);
         scrollMax_ = std::max(0, contentBottom - static_cast<int>(area.bottom));
         scroll_ = std::clamp(scroll_, 0, scrollMax_);
         const SCROLLINFO scrollInfo{sizeof(SCROLLINFO), SIF_RANGE | SIF_PAGE | SIF_POS,
@@ -714,6 +718,7 @@ private:
         move(saveButton_, pad + px(224), px(144), px(74), px(29), settings);
         move(lightThemeButton_, pad + px(116), px(308), px(76), px(30), settings);
         move(darkThemeButton_, pad + px(200), px(308), px(76), px(30), settings);
+        move(copyMcpButton_, pad + px(14), px(451), px(132), px(30), settings);
         for (size_t index = 0; index < rankSorts_.size(); ++index) {
             const auto panel = rankPanel(area, index);
             const int right = panel.right - px(RankInset);
@@ -1059,6 +1064,7 @@ private:
             queryHistory();
         } else if (target == Tab::Settings) {
             settingsMessage_.clear();
+            mcpMessage_.clear();
             appearanceMessage_.clear();
             try {
                 const auto days = callbacks_.retention ? callbacks_.retention() : 7;
@@ -1068,6 +1074,34 @@ private:
             }
         }
         invalidate();
+    }
+
+    void copyMcpConfig() {
+        const auto script = std::filesystem::path(callbacks_.executable).parent_path() / L"mcp_server.py";
+        std::error_code error;
+        if (callbacks_.executable.empty() || !std::filesystem::is_regular_file(script, error)) {
+            mcpMessage_ = L"找不到 MCP 服务脚本，请重新构建或安装。";
+        } else {
+            const std::wstring config = L"{\n  \"mcpServers\": {\n    \"computer-watch\": {\n"
+                L"      \"command\": \"uv\",\n      \"args\": [\"run\", \"--script\", \"" +
+                script.generic_wstring() + L"\"]\n    }\n  }\n}";
+            const auto bytes = (config.size() + 1) * sizeof(wchar_t);
+            HGLOBAL data = GlobalAlloc(GMEM_MOVEABLE, bytes);
+            bool copied = false;
+            if (data) {
+                if (auto* buffer = static_cast<wchar_t*>(GlobalLock(data))) {
+                    std::wmemcpy(buffer, config.c_str(), config.size() + 1);
+                    GlobalUnlock(data);
+                    if (OpenClipboard(window_)) {
+                        copied = EmptyClipboard() && SetClipboardData(CF_UNICODETEXT, data);
+                        CloseClipboard();
+                    }
+                }
+                if (!copied) GlobalFree(data);
+            }
+            mcpMessage_ = copied ? L"已复制，请粘贴到 MCP 客户端。" : L"无法复制，请重试。";
+        }
+        InvalidateRect(window_, nullptr, FALSE);
     }
 
     void saveSettings() {
@@ -1235,6 +1269,7 @@ private:
             case RightSortMemory: sortBy(1, RankField::Memory); break;
             case LightThemeButton: chooseTheme(false); break;
             case DarkThemeButton: chooseTheme(true); break;
+            case CopyMcpButton: copyMcpConfig(); break;
             }
             return 0;
         case WM_COMMAND:
@@ -1674,6 +1709,13 @@ private:
         label(dc, normalFont_, L"显示模式", {pad + px(14), px(308), pad + px(107), px(338)}, theme_->secondary);
         label(dc, smallFont_, appearanceMessage_,
             {pad + px(290), px(308), area.right - pad - px(14), px(338)}, theme_->amber);
+
+        rounded(dc, {pad, px(384), area.right - pad, px(McpCardBottom)}, px(22), theme_->surface, theme_->border);
+        label(dc, boldFont_, L"MCP 客户端接入", {pad + px(14), px(393), area.right - pad, px(421)});
+        label(dc, smallFont_, L"通过本机 stdio 只读查询已保存的采样和进程排行。客户端需要 uv。",
+            {pad + px(14), px(420), area.right - pad - px(14), px(444)}, theme_->secondary);
+        label(dc, smallFont_, mcpMessage_,
+            {pad + px(158), px(451), area.right - pad - px(14), px(481)}, theme_->blue);
     }
 
     void paintDetailSummary(HDC dc, RECT area,
@@ -1878,6 +1920,7 @@ private:
     HWND window_{}, liveButton_{}, historyButton_{}, settingsButton_{}, cpuCombo_{}, gpuCombo_{};
     HWND picker_{}, rangeCombo_{}, queryButton_{}, retentionEdit_{}, saveButton_{};
     HWND lightThemeButton_{}, darkThemeButton_{};
+    HWND copyMcpButton_{};
     HWND cpuDetailButton_{}, gpuDetailButton_{}, diskDetailButton_{}, detailBackButton_{};
     HWND coreList_{}, diskList_{}, rankTooltip_{};
     struct RankTip { RECT bounds{}; std::wstring text; };
@@ -1908,6 +1951,7 @@ private:
     int64_t historyStart_{}, historyEnd_{}, historyTarget_{};
     bool liveFailed_{}, historyFailed_{};
     std::wstring settingsMessage_;
+    std::wstring mcpMessage_;
     std::wstring appearanceMessage_;
 };
 

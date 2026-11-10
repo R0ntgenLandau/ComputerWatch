@@ -7,7 +7,9 @@ $ErrorActionPreference = 'Stop'
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = [Security.Principal.WindowsPrincipal]::new($identity)
 $source = Join-Path $PSScriptRoot 'build/ComputerWatch.exe'
-if (!$Uninstall -and !(Test-Path -LiteralPath $source -PathType Leaf)) {
+$mcpSource = Join-Path $PSScriptRoot 'build/mcp_server.py'
+if (!$Uninstall -and (!(Test-Path -LiteralPath $source -PathType Leaf) -or
+    !(Test-Path -LiteralPath $mcpSource -PathType Leaf))) {
     throw 'Run build.ps1 before installing.'
 }
 
@@ -26,11 +28,12 @@ if ($TargetSid -and $TargetSid -ne $identity.User.Value) {
 
 $directory = Join-Path ([Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)) 'ComputerWatch'
 $executable = Join-Path $directory 'ComputerWatch.exe'
+$mcpScript = Join-Path $directory 'mcp_server.py'
 $dashboardTask = 'ComputerWatch Dashboard'
 $sensorTask = 'ComputerWatch CPU Sensors'
 $taskNames = @($dashboardTask, $sensorTask)
 
-foreach ($path in @($directory, $executable)) {
+foreach ($path in @($directory, $executable, $mcpScript)) {
     $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
     if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
         throw "Refusing to use a redirected install path: $path"
@@ -59,6 +62,7 @@ foreach ($name in $taskNames) {
 
 if ($Uninstall) {
     if (Test-Path -LiteralPath $executable) { Remove-Item -LiteralPath $executable }
+    if (Test-Path -LiteralPath $mcpScript -PathType Leaf) { Remove-Item -LiteralPath $mcpScript }
     if ((Test-Path -LiteralPath $directory) -and !(Get-ChildItem -Force -LiteralPath $directory)) {
         Remove-Item -LiteralPath $directory
     }
@@ -67,6 +71,7 @@ if ($Uninstall) {
 
 New-Item -ItemType Directory -Path $directory -Force | Out-Null
 Copy-Item -LiteralPath $source -Destination $executable -Force
+Copy-Item -LiteralPath $mcpSource -Destination $mcpScript -Force
 
 $trigger = New-ScheduledTaskTrigger -AtLogOn -User $identity.Name
 $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries

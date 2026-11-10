@@ -526,6 +526,7 @@ int run(HINSTANCE instance, std::wstring_view arguments) {
     callbacks.selectDetail = [&](DetailPane pane) { collector.selectDetail(pane); };
     callbacks.darkMode = readDarkMode;
     callbacks.setDarkMode = writeDarkMode;
+    callbacks.executable = executablePath();
 
     if (startVisible) startCpuHelper();
     return runUi(instance, startVisible, std::move(callbacks));

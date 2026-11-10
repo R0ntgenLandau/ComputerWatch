@@ -42,4 +42,5 @@ try {
 } finally {
     Pop-Location
 }
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'mcp_server.py') -Destination $build -Force
 Get-Item -LiteralPath (Join-Path $build 'ComputerWatch.exe')

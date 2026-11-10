@@ -24,6 +24,7 @@ struct UiCallbacks {
     std::function<void(DetailPane)> selectDetail;
     std::function<bool()> darkMode;
     std::function<bool(bool)> setDarkMode;
+    std::wstring executable;
 };
 
 int runUi(HINSTANCE instance, bool startVisible, UiCallbacks callbacks);
