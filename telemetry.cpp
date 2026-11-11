@@ -396,6 +396,57 @@ public:
         return modelText(name);
     }
 
+    GpuSpecifications specifications() const {
+        GpuSpecifications result;
+        if (!device_)
+            return result;
+
+        const auto readNumber = [&](const char* symbol) -> double {
+            const auto query = resolve<GetUnsigned>(module_, symbol);
+            unsigned int value{};
+            return query && query(device_, &value) == 0 ? value : missing;
+        };
+        const auto readText = [&](const char* symbol) -> std::wstring {
+            using GetText = int (*)(Device, char*, unsigned int);
+            const auto query = resolve<GetText>(module_, symbol);
+            char value[256]{};
+            if (!query || query(device_, value, sizeof(value)) != 0)
+                return {};
+            value[sizeof(value) - 1] = 0;
+            return modelText(value);
+        };
+
+        result.cores = readNumber("nvmlDeviceGetNumGpuCores");
+        result.memoryBusWidth = readNumber("nvmlDeviceGetMemoryBusWidth");
+        result.defaultPowerLimitWatts = readNumber("nvmlDeviceGetPowerManagementDefaultLimit") / 1000.0;
+        result.maxPcieGeneration = readNumber("nvmlDeviceGetGpuMaxPcieLinkGeneration");
+        result.hostMaxPcieGeneration = readNumber("nvmlDeviceGetMaxPcieLinkGeneration");
+        result.hostMaxPcieWidth = readNumber("nvmlDeviceGetMaxPcieLinkWidth");
+        result.vbios = readText("nvmlDeviceGetVbiosVersion");
+        result.boardPartNumber = readText("nvmlDeviceGetBoardPartNumber");
+        result.serial = readText("nvmlDeviceGetSerial");
+
+        Memory memory{};
+        if (getMemory_ && getMemory_(device_, &memory) == 0)
+            result.memoryCapacity = static_cast<double>(memory.total);
+
+        using GetCapability = int (*)(Device, int*, int*);
+        const auto getCapability = resolve<GetCapability>(module_, "nvmlDeviceGetCudaComputeCapability");
+        int major{}, minor{};
+        if (getCapability && getCapability(device_, &major, &minor) == 0)
+            result.cudaCapability = std::to_wstring(major) + L"." + std::to_wstring(minor);
+
+        // Indexed by the values of NVML_DEVICE_ARCH_* in nvml.h.
+        static constexpr std::array architectures{L"", L"", L"Kepler", L"Maxwell", L"Pascal",
+            L"Volta", L"Turing", L"Ampere", L"Ada Lovelace", L"Hopper", L"Blackwell",
+            L"DLA", L"DLA2", L"Rubin", L"", L"NPU3"};
+        unsigned int architecture{};
+        if (getArchitecture_ && getArchitecture_(device_, &architecture) == 0 && architecture < architectures.size())
+            result.architecture = architectures[architecture];
+
+        return result;
+    }
+
     ~NvidiaGpu() {
         hotspot_.reset();
         if (initialized_)
@@ -830,6 +881,7 @@ struct Telemetry::Impl {
         result.disks = readDiskModels();
         result.graphics = graphicsModels();
         result.sampledGpu = gpu.model();
+        result.gpu = gpu.specifications();
         if (result.graphics.empty() && !result.sampledGpu.empty()) {
             result.graphics.push_back(result.sampledGpu);
         }

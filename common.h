@@ -97,9 +97,21 @@ struct MemoryTimingReport {
     std::vector<MemoryTimingField> fields;
 };
 
+struct GpuSpecifications {
+    std::wstring architecture, cudaCapability, vbios, boardPartNumber, serial;
+    double cores = Missing;
+    double memoryCapacity = Missing;
+    double memoryBusWidth = Missing;
+    double defaultPowerLimitWatts = Missing;
+    double maxPcieGeneration = Missing;
+    double hostMaxPcieGeneration = Missing;
+    double hostMaxPcieWidth = Missing;
+};
+
 struct HardwareInventory {
     std::vector<std::wstring> processors, memory, disks, graphics;
     std::wstring sampledGpu;
+    GpuSpecifications gpu;
     std::vector<MemoryDevice> memoryDevices;
     double installedMemory = Missing;
 };

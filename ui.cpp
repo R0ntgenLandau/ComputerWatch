@@ -92,7 +92,8 @@ constexpr int DiskSummaryTop = 157;
 constexpr int DiskSummaryHeight = 112;
 constexpr int DiskSmartTop = 347;
 constexpr int DiskPageHeight = 535;
-constexpr int GpuPageHeight = 583;
+constexpr int GpuSpecificationsHeight = 186;
+constexpr int GpuPageHeight = 583 + GpuSpecificationsHeight;
 
 const wchar_t* readingStatus(ReadingStatus status) {
     switch (status) {
@@ -2192,13 +2193,32 @@ private:
             label(dc, boldFont_, title, {left + px(12), px(top + 4), right - px(12), px(top + 30)});
             paintDetailFields(dc, {left + px(12), px(top + 31), right - px(4), px(bottom)}, fields);
         };
-        section(225, 328, L"显存与视频", {
+        const GpuSpecifications empty;
+        const auto& specs = inventory_ ? inventory_->gpu : empty;
+        const auto generation = [](double value) -> std::wstring {
+            return std::isfinite(value) ? L"Gen " + decimal(value, 0, L"") : L"—";
+        };
+        section(225, 225 + GpuSpecificationsHeight - 12, L"硬件规格与板卡信息", {
+            {L"CUDA 核心数", decimal(specs.cores, 0, L"")},
+            {L"GPU 架构", specs.architecture},
+            {L"显存容量", bytes(specs.memoryCapacity)},
+            {L"显存位宽", decimal(specs.memoryBusWidth, 0, L" bit")},
+            {L"CUDA 计算能力", specs.cudaCapability},
+            {L"默认功耗上限", decimal(specs.defaultPowerLimitWatts, 1, L" W")},
+            {L"显卡 PCIe 上限", generation(specs.maxPcieGeneration)},
+            {L"本机 PCIe 上限", generation(specs.hostMaxPcieGeneration)},
+            {L"本机最大通道数", decimal(specs.hostMaxPcieWidth, 0, L"")},
+            {L"VBIOS 版本", specs.vbios},
+            {L"板卡料号", specs.boardPartNumber},
+            {L"板卡序列号", specs.serial}
+        });
+        section(225 + GpuSpecificationsHeight, 328 + GpuSpecificationsHeight, L"显存与视频", {
             {L"显存已用 / 总量", bytes(value(snapshot, Metric::GpuMemoryUsed)) + L" / " + bytes(value(snapshot, Metric::GpuMemoryTotal))},
             {L"显存读写活跃度", decimal(details_.gpuMemoryActivity, 0, L"%")},
             {L"视频编码占用率", decimal(details_.gpuEncoderPercent, 0, L"%")},
             {L"视频解码占用率", decimal(details_.gpuDecoderPercent, 0, L"%")}
         });
-        section(340, 443, L"频率与散热", {
+        section(340 + GpuSpecificationsHeight, 443 + GpuSpecificationsHeight, L"频率与散热", {
             {L"核心频率", decimal(details_.gpuCoreMhz, 0, L" MHz")},
             {L"显存频率", decimal(details_.gpuMemoryMhz, 0, L" MHz")},
             {L"风扇设定转速", decimal(details_.gpuFanRpm, 0, L" RPM")},
@@ -2206,7 +2226,7 @@ private:
             {L"热点温度", decimal(details_.gpuHotspotC, 0, L" °C")},
             {L"温度限制", details_.gpuLimitsAvailable ? (details_.gpuThermalLimited ? L"已触发" : L"未触发") : L"—"}
         });
-        section(455, GpuPageHeight - PageInset, L"功耗与当前 PCIe 链路", {
+        section(455 + GpuSpecificationsHeight, GpuPageHeight - PageInset, L"功耗与当前 PCIe 链路", {
             {L"生效功耗上限", decimal(details_.gpuPowerLimitWatts, 1, L" W")},
             {L"功耗限制", details_.gpuLimitsAvailable ? (details_.gpuPowerLimited ? L"已触发" : L"未触发") : L"—"},
             {L"性能状态", std::isfinite(details_.gpuPerformanceState)
