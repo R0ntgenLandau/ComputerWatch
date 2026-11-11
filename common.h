@@ -22,7 +22,7 @@ inline constexpr std::size_t TopCount = 10;
 inline constexpr std::size_t MetricCount = static_cast<std::size_t>(Metric::Count);
 inline constexpr double Missing = std::numeric_limits<double>::quiet_NaN();
 
-enum class DetailPane { None, Cpu, Gpu, Disk, Memory };
+enum class DetailPane { None, Cpu, Gpu, Disk, Memory, Network };
 
 struct CoreDetail {
     unsigned group{};
@@ -123,11 +123,26 @@ struct HardwareInventory {
     double installedMemory = Missing;
 };
 
+struct NetworkConnection {
+    std::wstring name, description, macAddress;
+    bool physical{};
+    double receiveBitsPerSecond = Missing;
+    double transmitBitsPerSecond = Missing;
+    std::vector<std::wstring> ipv4, ipv6, gateways, dnsServers;
+};
+
+struct NetworkDetails {
+    unsigned physicalAdapters{}, virtualAdapters{};
+    bool addressesAvailable{};
+    std::vector<NetworkConnection> connections;
+};
+
 struct HardwareDetails {
     DetailPane pane = DetailPane::None;
     std::vector<CoreDetail> cores;
     std::vector<DiskDetail> disks;
     MemoryUsage memory;
+    std::optional<NetworkDetails> network;
     std::shared_ptr<const MemoryTimingReport> memoryTimings;
     double gpuCoreMhz = Missing;
     double gpuMemoryMhz = Missing;

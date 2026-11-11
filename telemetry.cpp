@@ -1020,6 +1020,112 @@ private:
     uint64_t generation_{};
 };
 
+std::wstring networkAddress(const SOCKET_ADDRESS& address) {
+    if (!address.lpSockaddr || address.iSockaddrLength < static_cast<int>(sizeof(ADDRESS_FAMILY)))
+        return {};
+    const auto length = static_cast<size_t>(address.iSockaddrLength);
+    wchar_t text[INET6_ADDRSTRLEN]{};
+    if (address.lpSockaddr->sa_family == AF_INET && length >= sizeof(sockaddr_in)) {
+        const auto& ipv4 = *reinterpret_cast<const sockaddr_in*>(address.lpSockaddr);
+        if (InetNtopW(AF_INET, &ipv4.sin_addr, text, INET6_ADDRSTRLEN))
+            return text;
+    } else if (address.lpSockaddr->sa_family == AF_INET6 && length >= sizeof(sockaddr_in6)) {
+        const auto& ipv6 = *reinterpret_cast<const sockaddr_in6*>(address.lpSockaddr);
+        if (InetNtopW(AF_INET6, &ipv6.sin6_addr, text, INET6_ADDRSTRLEN)) {
+            std::wstring result = text;
+            if (ipv6.sin6_scope_id)
+                result += L"%" + std::to_wstring(ipv6.sin6_scope_id);
+            return result;
+        }
+    }
+    return {};
+}
+
+template <typename Address>
+void appendNetworkAddresses(const Address* entry, std::vector<std::wstring>& addresses) {
+    for (; entry; entry = entry->Next) {
+        auto address = networkAddress(entry->Address);
+        if (!address.empty())
+            addresses.push_back(std::move(address));
+    }
+}
+
+std::optional<NetworkDetails> readNetworkDetails() {
+    MIB_IF_TABLE2* table{};
+    if (GetIfTable2(&table) != NO_ERROR)
+        return std::nullopt;
+    const std::unique_ptr<MIB_IF_TABLE2, decltype(&FreeMibTable)> owner(table, FreeMibTable);
+
+    NetworkDetails result;
+    ULONG size = 15 * 1024;
+    std::vector<std::byte> buffer(size);
+    IP_ADAPTER_ADDRESSES* adapters{};
+    for (int attempt = 0; attempt < 3; ++attempt) {
+        adapters = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buffer.data());
+        const ULONG status = GetAdaptersAddresses(AF_UNSPEC, GAA_FLAG_INCLUDE_GATEWAYS, nullptr, adapters, &size);
+        result.addressesAvailable = status == NO_ERROR || status == ERROR_NO_DATA;
+        if (status == NO_ERROR)
+            break;
+        adapters = nullptr;
+        if (status != ERROR_BUFFER_OVERFLOW || attempt == 2)
+            break;
+        buffer.resize(size);
+    }
+    std::unordered_map<uint64_t, const IP_ADAPTER_ADDRESSES*> byLuid;
+    for (auto* adapter = adapters; adapter; adapter = adapter->Next)
+        byLuid.emplace(adapter->Luid.Value, adapter);
+
+    for (ULONG index = 0; index < table->NumEntries; ++index) {
+        const auto& row = table->Table[index];
+        const auto flags = row.InterfaceAndOperStatusFlags;
+        if (flags.FilterInterface || row.Type == IF_TYPE_SOFTWARE_LOOPBACK)
+            continue;
+        if (flags.HardwareInterface)
+            ++result.physicalAdapters;
+        else
+            ++result.virtualAdapters;
+        if (row.OperStatus != IfOperStatusUp)
+            continue;
+
+        NetworkConnection connection;
+        connection.name = row.Alias;
+        connection.description = row.Description;
+        connection.physical = flags.HardwareInterface;
+        if (row.ReceiveLinkSpeed && row.ReceiveLinkSpeed != std::numeric_limits<ULONG64>::max())
+            connection.receiveBitsPerSecond = static_cast<double>(row.ReceiveLinkSpeed);
+        if (row.TransmitLinkSpeed && row.TransmitLinkSpeed != std::numeric_limits<ULONG64>::max())
+            connection.transmitBitsPerSecond = static_cast<double>(row.TransmitLinkSpeed);
+        if (row.PhysicalAddressLength <= sizeof(row.PhysicalAddress)) {
+            constexpr wchar_t hex[] = L"0123456789ABCDEF";
+            for (ULONG byte = 0; byte < row.PhysicalAddressLength; ++byte) {
+                if (byte) connection.macAddress += L'-';
+                connection.macAddress += hex[row.PhysicalAddress[byte] >> 4];
+                connection.macAddress += hex[row.PhysicalAddress[byte] & 0xf];
+            }
+        }
+        if (const auto entry = byLuid.find(row.InterfaceLuid.Value); entry != byLuid.end()) {
+            const auto& adapter = *entry->second;
+            for (auto* ip = adapter.FirstUnicastAddress; ip; ip = ip->Next) {
+                auto address = networkAddress(ip->Address);
+                if (address.empty()) continue;
+                auto& addresses = ip->Address.lpSockaddr->sa_family == AF_INET ? connection.ipv4 : connection.ipv6;
+                addresses.push_back(std::move(address));
+            }
+            appendNetworkAddresses(adapter.FirstGatewayAddress, connection.gateways);
+            appendNetworkAddresses(adapter.FirstDnsServerAddress, connection.dnsServers);
+        }
+        // Internal miniports can report Up without carrying an IP connection.
+        if (connection.physical || !connection.ipv4.empty() || !connection.ipv6.empty())
+            result.connections.push_back(std::move(connection));
+    }
+    std::stable_sort(result.connections.begin(), result.connections.end(), [](const auto& left, const auto& right) {
+        if (left.gateways.empty() != right.gateways.empty()) return !left.gateways.empty();
+        if (left.physical != right.physical) return left.physical;
+        return left.name < right.name;
+    });
+    return result;
+}
+
 class Network {
     struct Count {
         uint64_t down;
@@ -1125,6 +1231,8 @@ struct Telemetry::Impl {
             gpu.details(result);
         else
             gpu.stopDetails();
+        if (pane == DetailPane::Network)
+            result.network = readNetworkDetails();
         if (pane == DetailPane::Memory) {
             PERFORMANCE_INFORMATION info{};
             if (GetPerformanceInfo(&info, sizeof(info))) {

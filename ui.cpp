@@ -68,6 +68,8 @@ constexpr int MemoryPlotHeight = 182;
 constexpr int MemoryTimingHeight = 108;
 constexpr int MemoryDeviceHeight = 220;
 constexpr int EmptyMemorySlotHeight = 58;
+constexpr int NetworkCardsTop = 252;
+constexpr int NetworkRowHeight = 22;
 
 constexpr std::pair<const wchar_t*, int> CoreColumns[] = {
     {L"处理器组", 130}, {L"逻辑处理器", 130}, {L"占用率", 160}, {L"频率（估算）", 160}
@@ -106,7 +108,7 @@ const wchar_t* readingStatus(ReadingStatus status) {
     return L"read_failed";
 }
 
-enum class Tab { Live, History, Displays, Board, Settings, CpuDetails, GpuDetails, DiskDetails, MemoryDetails };
+enum class Tab { Live, History, Displays, Board, Settings, CpuDetails, GpuDetails, DiskDetails, MemoryDetails, NetworkDetails };
 enum class RankField { Cpu, Memory };
 
 struct RankSort {
@@ -120,7 +122,8 @@ enum ControlId {
     CpuDetailButton, GpuDetailButton, DiskDetailButton, DetailBackButton, CoreList, DiskList,
     LeftSortCpu, LeftSortMemory, RightSortCpu, RightSortMemory, LightThemeButton, DarkThemeButton, CopyMcpButton,
     DisplaysButton, DisplayList, RefreshDisplaysButton, MemoryDetailButton,
-    MemoryPlotButton, MemoryTimingButton, ImportMemoryTimingButton, MemoryTimingList, DiskSmartList, BoardButton
+    MemoryPlotButton, MemoryTimingButton, ImportMemoryTimingButton, MemoryTimingList, DiskSmartList, BoardButton,
+    NetworkDetailButton
 };
 
 const wchar_t* buttonCaption(unsigned id) {
@@ -133,6 +136,7 @@ const wchar_t* buttonCaption(unsigned id) {
     case SettingsButton: return L"设置";
     case CpuDetailButton:
     case MemoryDetailButton:
+    case NetworkDetailButton:
     case GpuDetailButton: return L"详情";
     case DiskDetailButton: return L"SMART";
     case DetailBackButton: return L"返回实时监控";
@@ -593,7 +597,8 @@ private:
         compactValueFont_ = readingFont_ ? font(15, FW_BOLD, ReadingFontFamily) : nullptr;
         boldFont_ = font(15, FW_SEMIBOLD);
         for (const auto child : {liveButton_, historyButton_, displaysButton_, boardButton_, settingsButton_, cpuCombo_, gpuCombo_, rangeCombo_,
-            cpuDetailButton_, memoryDetailButton_, gpuDetailButton_, diskDetailButton_, detailBackButton_, picker_, queryButton_,
+            cpuDetailButton_, memoryDetailButton_, gpuDetailButton_, diskDetailButton_, networkDetailButton_,
+            detailBackButton_, picker_, queryButton_,
             memoryPlotButton_, memoryTimingButton_, importMemoryTimingButton_,
             retentionEdit_, saveButton_, lightThemeButton_, darkThemeButton_, copyMcpButton_, refreshDisplaysButton_,
             coreList_, diskList_, diskSmartList_, displayList_, memoryTimingList_}) {
@@ -624,6 +629,7 @@ private:
         importMemoryTimingButton_ = button(ImportMemoryTimingButton);
         gpuDetailButton_ = button(GpuDetailButton);
         diskDetailButton_ = button(DiskDetailButton);
+        networkDetailButton_ = button(NetworkDetailButton);
         detailBackButton_ = button(DetailBackButton);
         picker_ = control(DATETIMEPICK_CLASSW, L"", DTS_SHORTDATEFORMAT, HistoryPicker);
         styleControl(picker_);
@@ -717,7 +723,28 @@ private:
         if (tab_ == Tab::DiskDetails) {
             return DetailPane::Disk;
         }
+        if (tab_ == Tab::NetworkDetails) {
+            return DetailPane::Network;
+        }
         return DetailPane::None;
+    }
+
+    int networkCardHeight(const NetworkConnection& connection) const {
+        int rows = 3; // Model, link speed and MAC address.
+        if (details_.network->addressesAvailable) {
+            for (const auto* addresses : {&connection.ipv4, &connection.ipv6, &connection.gateways, &connection.dnsServers})
+                rows += static_cast<int>(std::max<size_t>(1, addresses->size()));
+        }
+        return 52 + rows * NetworkRowHeight;
+    }
+
+    int networkPageHeight() const {
+        int bottom = NetworkCardsTop;
+        if (details_.network) {
+            for (const auto& connection : details_.network->connections)
+                bottom += networkCardHeight(connection) + ModuleGap;
+        }
+        return std::max(390, bottom + PageInset - ModuleGap);
     }
 
     RECT rankPanel(RECT area, size_t index) const {
@@ -832,7 +859,8 @@ private:
             px(settings ? McpCardBottom + PageInset : tab_ == Tab::Displays ? displayPageHeight() :
                 tab_ == Tab::Board ? boardPageHeight() :
                 detail == DetailPane::Memory ? memoryPageHeight() : detail == DetailPane::Disk ? DiskPageHeight :
-                detail == DetailPane::Gpu ? GpuPageHeight : 390);
+                detail == DetailPane::Gpu ? GpuPageHeight :
+                detail == DetailPane::Network ? networkPageHeight() : 390);
         scrollMax_ = std::max(0, contentBottom - static_cast<int>(area.bottom));
         scroll_ = std::clamp(scroll_, 0, scrollMax_);
         const SCROLLINFO scrollInfo{sizeof(SCROLLINFO), SIF_RANGE | SIF_PAGE | SIF_POS,
@@ -892,6 +920,7 @@ private:
             details_.memoryTimings && !details_.memoryTimings->fields.empty());
         move(gpuDetailButton_, cards_[3].right - px(CardInset + 46), cards_[3].top + px(12), px(46), px(24), live);
         move(diskDetailButton_, cards_[2].right - px(CardInset + 60), cards_[2].top + px(12), px(60), px(24), live);
+        move(networkDetailButton_, cards_[4].right - px(CardInset + 46), cards_[4].top + px(12), px(46), px(24), live);
         move(picker_, pad + px(70), px(78) + extra, px(202), px(27), history);
         move(rangeCombo_, pad + px(281), px(78) + extra, px(92), px(120), history);
         move(queryButton_, pad + px(383), px(78) + extra, px(68), px(27), history);
@@ -1055,6 +1084,8 @@ private:
         const auto* selectedDisk = selectedSmartDisk();
         const auto diskNumber = selectedDisk ? std::optional<unsigned>(selectedDisk->number) : std::nullopt;
         const size_t previousTimings = details_.memoryTimings ? details_.memoryTimings->fields.size() : 0;
+        const bool networkActive = detailPane() == DetailPane::Network;
+        const int previousNetworkHeight = networkActive ? networkPageHeight() : 0;
         details_ = std::move(details);
         updateDetailList(coreList_, previousCores, details_.cores.size(), detailPane() == DetailPane::Cpu);
         updateDetailList(diskList_, previousDisks, details_.disks.size(), detailPane() == DetailPane::Disk);
@@ -1072,6 +1103,7 @@ private:
             detailPane() == DetailPane::Memory && memoryTimingExpanded_);
         if (detailPane() == DetailPane::Memory && previousTimings !=
             (details_.memoryTimings ? details_.memoryTimings->fields.size() : 0)) layout();
+        if (networkActive && previousNetworkHeight != networkPageHeight()) layout();
     }
 
     int selectedDiskIndex() const {
@@ -1593,6 +1625,7 @@ private:
             case ImportMemoryTimingButton: importMemoryTiming(); break;
             case GpuDetailButton: activate(Tab::GpuDetails); break;
             case DiskDetailButton: activate(Tab::DiskDetails); break;
+            case NetworkDetailButton: activate(Tab::NetworkDetails); break;
             case DetailBackButton: activate(Tab::Live); break;
             case LeftSortCpu: sortBy(0, RankField::Cpu); break;
             case LeftSortMemory: sortBy(0, RankField::Memory); break;
@@ -2072,6 +2105,63 @@ private:
         }
     }
 
+    void paintNetworkDetails(HDC dc, RECT area, const Snapshot* snapshot) const {
+        const int left = px(PageInset);
+        const int right = area.right - left;
+        const auto& network = details_.network;
+        label(dc, titleFont_, L"网络实时详情", {left, px(83), right, px(120)});
+        paintDetailSummary(dc, {left, px(130), right, px(205)}, {
+            {L"物理网卡", network ? std::to_wstring(network->physicalAdapters) : L"—"},
+            {L"虚拟网卡", network ? std::to_wstring(network->virtualAdapters) : L"—"},
+            {L"当前下载", bytes(value(snapshot, Metric::NetworkDown), true)},
+            {L"当前上传", bytes(value(snapshot, Metric::NetworkUp), true)}
+        });
+        label(dc, boldFont_, L"当前网络连接", {left, px(212), right, px(244)});
+        if (!network || !network->addressesAvailable || network->connections.empty()) {
+            const auto message = !network ? (details_.pane == DetailPane::Network ?
+                L"无法读取网卡信息" : L"正在读取网卡信息…") :
+                !network->addressesAvailable ? L"无法读取 IP 配置" : L"暂无活动网络连接";
+            label(dc, normalFont_, message, {left + px(125), px(212), right, px(244)}, theme_->muted);
+        }
+        if (!network) return;
+
+        const auto speed = [](double bits) {
+            return bits >= 1e9 ? decimal(bits / 1e9, 2, L" Gbps") : decimal(bits / 1e6, 1, L" Mbps");
+        };
+        int top = NetworkCardsTop;
+        for (const auto& connection : network->connections) {
+            const int height = networkCardHeight(connection);
+            rounded(dc, {left, px(top), right, px(top + height)}, px(14), theme_->surface, theme_->border);
+            const auto title = (connection.name.empty() ? L"网络连接" : connection.name) +
+                (connection.physical ? L"  ·  物理网卡" : L"  ·  虚拟网卡");
+            label(dc, boldFont_, title, {left + px(14), px(top + 6), right - px(14), px(top + 37)});
+            int row = top + 39;
+            const auto field = [&](std::wstring_view name, std::wstring_view reading) {
+                label(dc, smallFont_, name, {left + px(14), px(row), left + px(144), px(row + NetworkRowHeight)},
+                    theme_->secondary);
+                label(dc, normalFont_, reading.empty() ? L"—" : reading,
+                    {left + px(146), px(row), right - px(14), px(row + NetworkRowHeight)});
+                row += NetworkRowHeight;
+            };
+            const auto addresses = [&](std::wstring_view name, const std::vector<std::wstring>& entries) {
+                if (entries.empty()) field(name, L"—");
+                for (size_t index = 0; index < entries.size(); ++index)
+                    field(index == 0 ? name : L"", entries[index]);
+            };
+            field(L"网卡型号", connection.description);
+            field(L"链路速率（收 / 发）",
+                speed(connection.receiveBitsPerSecond) + L" / " + speed(connection.transmitBitsPerSecond));
+            field(L"MAC 地址", connection.macAddress);
+            if (network->addressesAvailable) {
+                addresses(L"IPv4 地址", connection.ipv4);
+                addresses(L"IPv6 地址", connection.ipv6);
+                addresses(L"默认网关", connection.gateways);
+                addresses(L"DNS 服务器", connection.dnsServers);
+            }
+            top += height + ModuleGap;
+        }
+    }
+
     void paintCpuDetails(HDC dc, RECT area, const Snapshot* snapshot) const {
         const int left = px(24);
         const int right = area.right - left;
@@ -2494,6 +2584,7 @@ private:
         case DetailPane::Memory: paintMemoryDetails(dc, area, snapshot); return;
         case DetailPane::Gpu: paintGpuDetails(dc, area, snapshot); return;
         case DetailPane::Disk: paintDiskDetails(dc, area); return;
+        case DetailPane::Network: paintNetworkDetails(dc, area, snapshot); return;
         case DetailPane::None: break;
         }
 
@@ -2549,6 +2640,7 @@ private:
     HWND lightThemeButton_{}, darkThemeButton_{};
     HWND copyMcpButton_{};
     HWND cpuDetailButton_{}, memoryDetailButton_{}, gpuDetailButton_{}, diskDetailButton_{}, detailBackButton_{};
+    HWND networkDetailButton_{};
     HWND memoryPlotButton_{}, memoryTimingButton_{}, importMemoryTimingButton_{};
     HWND memoryTimingList_{};
     bool memoryPlotExpanded_{}, memoryTimingExpanded_ = true;

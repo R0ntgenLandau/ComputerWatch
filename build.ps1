@@ -83,7 +83,7 @@ try {
 
     $sources = @('main.cpp', 'telemetry.cpp', 'memory_timings.cpp', 'disk_smart.cpp', 'display_info.cpp', 'history.cpp', 'ui.cpp') |
         ForEach-Object { Join-Path $PSScriptRoot $_ }
-    & $compiler -std=c++20 -O2 -Wall -Wextra -Wpedantic -finput-charset=UTF-8 -DUNICODE -D_UNICODE -DNOMINMAX -D_WIN32_WINNT=0x0A00 -static -municode -mwindows @sources resources.o -o ComputerWatch.exe -lcomctl32 -lcomdlg32 -lgdi32 -lshell32 -ladvapi32 -lpdh -liphlpapi -lpsapi -lole32 -ldwmapi -luxtheme -lsetupapi
+    & $compiler -std=c++20 -O2 -Wall -Wextra -Wpedantic -finput-charset=UTF-8 -DUNICODE -D_UNICODE -DNOMINMAX -D_WIN32_WINNT=0x0A00 -static -municode -mwindows @sources resources.o -o ComputerWatch.exe -lcomctl32 -lcomdlg32 -lgdi32 -lshell32 -ladvapi32 -lpdh -liphlpapi -lws2_32 -lpsapi -lole32 -ldwmapi -luxtheme -lsetupapi
     if ($LASTEXITCODE -ne 0) { throw 'ComputerWatch compilation failed.' }
 } finally {
     Pop-Location
