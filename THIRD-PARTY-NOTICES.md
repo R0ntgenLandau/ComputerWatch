@@ -8,4 +8,4 @@ Computer Watch 自有代码采用 GPL-3.0-only。以下组件适用各自的许�
 - **编译器运行库**。x64 包附有 GCC 运行库许可及运行库例外、MinGW-w64 运行库和 winpthreads 许可。x86 和 ARM64 包附有 LLVM 许可及 LLVM 例外、MinGW-w64 运行库和 winpthreads 许可。相应文本在各包的 `licenses/` 目录。[GCC](https://gcc.gnu.org/) · [LLVM-MinGW](https://github.com/mstorsjo/llvm-mingw)
 - **运行时依赖**。发布包包含 Computer Watch 的 MCP 服务脚本，官方 MCP Python SDK 由 uv 另行获取。PawnIO 驱动和 PawnIOLib、NVIDIA NVML 由用户的系统或硬件厂商提供。[MCP Python SDK](https://github.com/modelcontextprotocol/python-sdk) · [PawnIO](https://pawnio.eu/)
 
-Computer Watch 本版本的源码和打包脚本见 [V0.1.0001 源码标签](https://github.com/R0ntgenLandau/ComputerWatch/tree/V0.1.0001)。
+Computer Watch 本版本的源码和打包脚本见 [V0.1.0002 源码标签](https://github.com/R0ntgenLandau/ComputerWatch/tree/V0.1.0002)。
