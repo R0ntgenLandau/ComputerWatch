@@ -4,15 +4,17 @@ Computer Watch 是一款在 Windows 本机运行的桌面监控工具。面板�
 
 ## 下载和安装
 
-当前版本为 [V0.1.0002](https://github.com/R0ntgenLandau/ComputerWatch/releases/tag/V0.1.0002)。根据 Windows 的系统类型选择对应的 ZIP。
+当前版本为 [V0.1.0003](https://github.com/R0ntgenLandau/ComputerWatch/releases/tag/V0.1.0003)。根据 Windows 的系统类型选择对应的 ZIP。
 
 | 系统类型 | 下载 |
 | --- | --- |
-| x86（32 位） | [Windows x86](https://github.com/R0ntgenLandau/ComputerWatch/releases/download/V0.1.0002/ComputerWatch-V0.1.0002-windows-x86.zip) |
-| x64（64 位） | [Windows x64](https://github.com/R0ntgenLandau/ComputerWatch/releases/download/V0.1.0002/ComputerWatch-V0.1.0002-windows-x64.zip) |
-| ARM64（64 位 ARM） | [Windows ARM64](https://github.com/R0ntgenLandau/ComputerWatch/releases/download/V0.1.0002/ComputerWatch-V0.1.0002-windows-arm64.zip) |
+| x86（32 位） | [Windows x86](https://github.com/R0ntgenLandau/ComputerWatch/releases/download/V0.1.0003/ComputerWatch-V0.1.0003-windows-x86.zip) |
+| x64（64 位） | [Windows x64](https://github.com/R0ntgenLandau/ComputerWatch/releases/download/V0.1.0003/ComputerWatch-V0.1.0003-windows-x64.zip) |
+| ARM64（64 位 ARM） | [Windows ARM64](https://github.com/R0ntgenLandau/ComputerWatch/releases/download/V0.1.0003/ComputerWatch-V0.1.0003-windows-arm64.zip) |
 
 解压整个 ZIP，在解压目录用 PowerShell 运行 `./install.ps1`，并同意管理员权限提示。安装完成后从托盘打开 Computer Watch。卸载时运行 `./install.ps1 -Uninstall`。
+
+需要 Intel CPU 封装温度和功耗读数时，请从 [PawnIO 官网](https://pawnio.eu/) 安装驱动。
 
 ## 监控和历史
 

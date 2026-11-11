@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory)]
     [string] $LlvmMingw,
-    [string] $OutputDirectory
+    [string] $OutputDirectory,
+    [switch] $IncludePawnIOInstaller
 )
 
 $ErrorActionPreference = 'Stop'
@@ -19,7 +20,9 @@ $gcc = Get-Item -LiteralPath (Get-Command g++.exe -CommandType Application | Sel
 $gccLicenses = Join-Path $gcc.Directory.Parent.FullName 'share/licenses'
 
 $buildRoot = Join-Path $PSScriptRoot 'build'
-& (Join-Path $PSScriptRoot 'prepare-dependencies.ps1') | Out-Null
+if ($IncludePawnIOInstaller) {
+    & (Join-Path $PSScriptRoot 'prepare-dependencies.ps1') | Out-Null
+}
 New-Item -ItemType Directory -Path $buildRoot -Force | Out-Null
 $pawnSource = Join-Path $buildRoot 'PawnIO.Modules-0.2.11-source.tar.gz'
 $pawnCommit = '52a7e536dff3e53c96917a28caac5e0fa6510696'
@@ -51,12 +54,15 @@ foreach ($architecture in 'x86', 'x64', 'arm64') {
     }
 
     $name = "ComputerWatch-$version-windows-$architecture"
+    if ($architecture -eq 'x64' -and $IncludePawnIOInstaller) {
+        $name += '-pawnio-candidate'
+    }
     $staging = Join-Path $PSScriptRoot "build/staging/$name"
     $payload = Join-Path $staging 'build'
     $licenses = Join-Path $staging 'licenses'
     New-Item -ItemType Directory -Path $payload, $licenses -Force | Out-Null
     Copy-Item -LiteralPath $exe.FullName, (Join-Path $exe.DirectoryName 'mcp_server.py') -Destination $payload -Force
-    if ($architecture -eq 'x64') {
+    if ($architecture -eq 'x64' -and $IncludePawnIOInstaller) {
         $dependencies = Join-Path $payload 'dependencies'
         New-Item -ItemType Directory -Path $dependencies -Force | Out-Null
         Copy-Item -LiteralPath (Join-Path $buildRoot 'dependencies/PawnIO_setup.exe') -Destination $dependencies -Force
