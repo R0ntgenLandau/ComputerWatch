@@ -8,6 +8,10 @@
 
 卸载时从同一目录运行 `./install.ps1 -Uninstall`。
 
+x64 候选包附带经摘要和签名校验的官方 PawnIO 2.2.0 安装器，安装脚本会处理缺失或较旧版本。默认卸载保留系统共享的 PawnIO；需要一起移除时使用 `./install.ps1 -Uninstall -RemovePawnIO`。这会影响其他使用 PawnIO 的软件。
+
+内存详情展示实时使用情况、内存设备信息和可展开的最近 60 秒曲线。自动时序采集仍在开发验证阶段，尚无完整实测通过的平台。完整的平台矩阵、字段覆盖、依赖和验证步骤见包内 MEMORY_TIMINGS.md。报告导入属于历史对照功能。
+
 CPU 封装温度与功耗依赖兼容的 Intel 处理器和 PawnIO。ARM64 设备没有这组 Intel 读数。NVIDIA GPU 读数取决于对应架构的 NVML。缺失读数在界面中显示为缺失。
 
 从源码打包时，在项目根目录运行 `./package.ps1 -LlvmMingw <已解压的 LLVM-MinGW 工具链目录>`。x64 使用 PATH 中的 MSYS2 UCRT64 GCC 和 windres 及其许可文件，x86 和 ARM64 使用指定的 LLVM-MinGW。生成的 ZIP 位于 `package/`，远程下载请使用 GitHub Releases。

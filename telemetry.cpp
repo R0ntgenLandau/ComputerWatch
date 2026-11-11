@@ -13,6 +13,7 @@
 #include <cfgmgr32.h>
 #include <pdh.h>
 #include <pdhmsg.h>
+#include <psapi.h>
 #include <winternl.h>
 
 #include "telemetry.h"
@@ -73,6 +74,79 @@ std::wstring firmwareString(const BYTE* first, const BYTE* end, unsigned index) 
     return {};
 }
 
+MemoryDevice readMemoryDevice(const BYTE* entry, const BYTE* strings, const BYTE* end, BYTE smbiosMajor,
+    BYTE smbiosMinor) {
+    const auto length = static_cast<size_t>(strings - entry);
+    const auto field = [&]<typename T>(size_t offset, T fallback) {
+        if (offset + sizeof(T) > length) return fallback;
+        T value{};
+        std::memcpy(&value, entry + offset, sizeof(value));
+        return value;
+    };
+    const auto byte = [&](size_t offset) { return field(offset, BYTE{}); };
+    const auto word = [&](size_t offset) { return field(offset, WORD{}); };
+    const auto text = [&](size_t offset) { return firmwareString(strings, end, byte(offset)); };
+    const auto speed = [&](size_t offset, size_t extendedOffset) -> double {
+        const auto legacy = word(offset);
+        const auto value = legacy == 0xffff ? field(extendedOffset, DWORD{}) & 0x7fffffff : legacy;
+        return value ? static_cast<double>(value) : missing;
+    };
+    const auto width = [&](size_t offset) -> double {
+        const auto value = field(offset, WORD{0xffff});
+        return value == 0xffff ? missing : static_cast<double>(value);
+    };
+    const auto volts = [&](size_t offset) -> double {
+        const auto value = word(offset);
+        return value ? value / 1000.0 : missing;
+    };
+    constexpr const wchar_t* types[]{
+        L"", L"", L"", L"DRAM", L"EDRAM", L"VRAM", L"SRAM", L"RAM", L"ROM",
+        L"Flash", L"EEPROM", L"FEPROM", L"EPROM", L"CDRAM", L"3DRAM", L"SDRAM",
+        L"SGRAM", L"RDRAM", L"DDR", L"DDR2", L"DDR2 FB-DIMM", L"", L"", L"",
+        L"DDR3", L"FBD2", L"DDR4", L"LPDDR", L"LPDDR2", L"LPDDR3", L"LPDDR4",
+        L"逻辑非易失内存", L"HBM", L"HBM2", L"DDR5", L"LPDDR5", L"HBM3", L"MRDIMM"
+    };
+    constexpr const wchar_t* forms[]{
+        L"", L"", L"", L"SIMM", L"SIP", L"芯片", L"DIP", L"ZIP", L"专用卡",
+        L"DIMM", L"TSOP", L"行芯片", L"RIMM", L"SO-DIMM", L"SRIMM", L"FB-DIMM",
+        L"芯片裸片", L"CAMM", L"CUDIMM", L"CSODIMM"
+    };
+    const auto enumText = [](const auto& names, BYTE code) -> std::wstring {
+        if (code < std::size(names) && *names[code]) return names[code];
+        if (code <= 2) return code == 1 ? L"其他" : L"";
+        return L"SMBIOS 编码 " + std::to_wstring(code);
+    };
+    MemoryDevice device;
+    device.slot = text(0x10);
+    device.bank = text(0x11);
+    const auto size = field(0x0c, WORD{0xffff});
+    device.empty = size == 0;
+    if (device.empty) return device;
+    if (size == 0x7fff) {
+        const auto extended = field(0x1c, DWORD{}) & 0x7fffffff;
+        if (extended) device.capacity = extended * 1048576.0;
+    } else if (size != 0xffff) {
+        device.capacity = (size & 0x7fff) * ((size & 0x8000) ? 1024.0 : 1048576.0);
+    }
+    device.manufacturer = text(0x17);
+    device.serialNumber = text(0x18);
+    device.assetTag = text(0x19);
+    device.partNumber = text(0x1a);
+    device.type = enumText(types, byte(0x12));
+    device.formFactor = enumText(forms, byte(0x0e));
+    // Before SMBIOS 3.1 the specified unit differed from some firmware implementations.
+    device.legacySpeed = smbiosMajor < 3 || (smbiosMajor == 3 && smbiosMinor == 0);
+    device.ratedSpeed = speed(0x15, 0x54);
+    device.configuredSpeed = speed(0x20, 0x58);
+    device.dataWidth = width(0x0a);
+    device.totalWidth = width(0x08);
+    if (const auto ranks = byte(0x1b) & 0xf) device.ranks = ranks;
+    device.minVolts = volts(0x22);
+    device.maxVolts = volts(0x24);
+    device.configuredVolts = volts(0x26);
+    return device;
+}
+
 void readFirmwareModels(HardwareInventory& inventory) {
     constexpr DWORD rawSmbios = 0x52534D42; // RSMB
     constexpr UINT headerSize = 8;
@@ -95,15 +169,17 @@ void readFirmwareModels(HardwareInventory& inventory) {
         while (end - last >= 2 && (last[0] || last[1])) ++last;
         if (end - last < 2) break;
 
-        // Type 4: Socket Populated, Processor Version. Type 17: Size,
-        // Device Locator and Part Number. Size zero is an empty slot.
+        // Type 4: populated processor socket. Type 17: memory device or empty slot.
         if (type == 4 && formattedLength > 0x18 && (entry[0x18] & 0x40)) {
             inventory.processors.push_back(firmwareString(strings, last, entry[0x10]));
-        } else if (type == 17 && formattedLength > 0x0d && (entry[0x0c] || entry[0x0d])) {
-            auto slot = formattedLength > 0x10 ? firmwareString(strings, last, entry[0x10]) : std::wstring{};
-            const auto model = formattedLength > 0x1a ? firmwareString(strings, last, entry[0x1a]) : std::wstring{};
-            if (slot.empty()) slot = L"内存 " + std::to_wstring(inventory.memory.size() + 1);
-            inventory.memory.push_back(slot + L" · " + (model.empty() ? L"型号未提供" : model));
+        } else if (type == 17 && formattedLength >= 0x15) {
+            auto device = readMemoryDevice(entry, strings, last, bytes[1], bytes[2]);
+            if (device.slot.empty()) device.slot = L"内存设备 " + std::to_wstring(inventory.memoryDevices.size() + 1);
+            if (!device.empty) {
+                inventory.memory.push_back(device.slot + L" · " +
+                    (device.partNumber.empty() ? L"型号未提供" : device.partNumber));
+            }
+            inventory.memoryDevices.push_back(std::move(device));
         }
         entry = last + 2;
     }
@@ -714,6 +790,10 @@ struct Telemetry::Impl {
     HardwareInventory inventory() const {
         HardwareInventory result;
         readFirmwareModels(result);
+        ULONGLONG installedKiB{};
+        if (GetPhysicallyInstalledSystemMemory(&installedKiB)) {
+            result.installedMemory = installedKiB * 1024.0;
+        }
         if (result.processors.empty()) result.processors.push_back(windowsProcessorName());
         else if (result.processors.front().empty()) result.processors.front() = windowsProcessorName();
         for (auto& name : result.processors) if (name.empty()) name = L"型号未提供";
@@ -756,6 +836,14 @@ struct Telemetry::Impl {
             gpu.details(result);
         else
             gpu.stopDetails();
+        if (pane == DetailPane::Memory) {
+            PERFORMANCE_INFORMATION info{};
+            if (GetPerformanceInfo(&info, sizeof(info))) {
+                const auto page = static_cast<double>(info.PageSize);
+                result.memory = {info.SystemCache * page, info.CommitTotal * page, info.CommitLimit * page,
+                    info.CommitPeak * page, info.KernelPaged * page, info.KernelNonpaged * page, page};
+            }
+        }
         return result;
     }
 

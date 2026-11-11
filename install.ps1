@@ -1,5 +1,6 @@
 param(
     [switch] $Uninstall,
+    [switch] $RemovePawnIO,
     [string] $TargetSid
 )
 
@@ -17,6 +18,7 @@ if (!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
     $systemPowerShell = Join-Path ([Environment]::SystemDirectory) 'WindowsPowerShell/v1.0/powershell.exe'
     $installArguments = @('-NoProfile', '-File', ('"' + $PSCommandPath + '"'), '-TargetSid', $identity.User.Value)
     if ($Uninstall) { $installArguments += '-Uninstall' }
+    if ($RemovePawnIO) { $installArguments += '-RemovePawnIO' }
     $setupProcess = Start-Process -FilePath $systemPowerShell -ArgumentList $installArguments -Verb RunAs -WindowStyle Hidden -Wait -PassThru
     if ($setupProcess.ExitCode -ne 0) { throw "ComputerWatch setup failed (exit $($setupProcess.ExitCode))." }
     return
@@ -33,7 +35,8 @@ $dashboardTask = 'ComputerWatch Dashboard'
 $sensorTask = 'ComputerWatch CPU Sensors'
 $taskNames = @($dashboardTask, $sensorTask)
 
-foreach ($path in @($directory, $executable, $mcpScript)) {
+foreach ($path in @($directory, $executable, $mcpScript,
+    (Join-Path $directory 'dependencies'), (Join-Path $directory 'dependencies/PawnIO_setup.exe'))) {
     $item = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
     if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
         throw "Refusing to use a redirected install path: $path"
@@ -61,6 +64,21 @@ foreach ($name in $taskNames) {
 }
 
 if ($Uninstall) {
+    if ($RemovePawnIO) {
+        $dependency = Join-Path $directory 'dependencies/PawnIO_setup.exe'
+        if (!(Test-Path $dependency) -or
+            (Get-FileHash $dependency).Hash -ne '1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032') {
+            throw 'The bundled PawnIO uninstaller could not be verified.'
+        }
+        $removal = Start-Process -FilePath $dependency -ArgumentList '-uninstall -silent' -WindowStyle Hidden -Wait -PassThru
+        if ($removal.ExitCode -notin 0, 3010) { throw "PawnIO removal failed ($($removal.ExitCode))." }
+    }
+    $dependency = Join-Path $directory 'dependencies/PawnIO_setup.exe'
+    if (Test-Path $dependency) { Remove-Item -LiteralPath $dependency }
+    $dependencyDirectory = Join-Path $directory 'dependencies'
+    if ((Test-Path $dependencyDirectory) -and !(Get-ChildItem -LiteralPath $dependencyDirectory -Force)) {
+        Remove-Item -LiteralPath $dependencyDirectory
+    }
     if (Test-Path -LiteralPath $executable) { Remove-Item -LiteralPath $executable }
     if (Test-Path -LiteralPath $mcpScript -PathType Leaf) { Remove-Item -LiteralPath $mcpScript }
     if ((Test-Path -LiteralPath $directory) -and !(Get-ChildItem -Force -LiteralPath $directory)) {
@@ -70,6 +88,23 @@ if ($Uninstall) {
 }
 
 New-Item -ItemType Directory -Path $directory -Force | Out-Null
+$dependencySource = Join-Path $PSScriptRoot 'build/dependencies/PawnIO_setup.exe'
+if (Test-Path $dependencySource) {
+    if ((Get-FileHash $dependencySource).Hash -ne '1F519A22E47187F70A1379A48CA604981C4FCF694F4E65B734AAA74A9FBA3032' -or
+        (Get-AuthenticodeSignature $dependencySource).Status -ne 'Valid') {
+        throw 'Bundled PawnIO installer verification failed.'
+    }
+    $dependencyDirectory = Join-Path $directory 'dependencies'
+    New-Item -ItemType Directory -Path $dependencyDirectory -Force | Out-Null
+    $dependency = Join-Path $dependencyDirectory 'PawnIO_setup.exe'
+    Copy-Item -LiteralPath $dependencySource -Destination $dependency -Force
+    $existingPawn = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\PawnIO' -ErrorAction SilentlyContinue
+    if (!$existingPawn -or [version]$existingPawn.DisplayVersion -lt [version]'2.2.0') {
+        $setup = Start-Process -FilePath $dependency -ArgumentList '-install -silent' -WindowStyle Hidden -Wait -PassThru
+        if ($setup.ExitCode -notin 0, 3010) { throw "PawnIO installation failed ($($setup.ExitCode))." }
+        if ($setup.ExitCode -eq 3010) { Write-Warning 'PawnIO requires a restart to finish installation.' }
+    }
+}
 Copy-Item -LiteralPath $source -Destination $executable -Force
 Copy-Item -LiteralPath $mcpSource -Destination $mcpScript -Force
 

@@ -1,6 +1,7 @@
 #include "common.h"
 #include "disk_smart.h"
 #include "history.h"
+#include "memory_timings.h"
 #include "telemetry.h"
 #include "ui.h"
 
@@ -72,7 +73,7 @@ private:
 };
 
 std::wstring channelName(DWORD pid, const wchar_t* part) {
-    return L"Local\\ComputerWatch.Sensors.2." + std::to_wstring(pid) + L"." + part;
+    return L"Local\\ComputerWatch.Sensors.3." + std::to_wstring(pid) + L"." + part;
 }
 
 std::wstring executablePath() {
@@ -139,6 +140,7 @@ struct SensorPage {
     CpuWord helperStamp;
     std::size_t diskCount;
     std::array<SharedDisk, 32> disks;
+    SharedMemoryTimings memory;
 };
 
 template<std::size_t Size>
@@ -171,7 +173,9 @@ public:
         : request_(CreateEventW(nullptr, FALSE, FALSE, channelName(pid_, L"request").c_str())),
           response_(CreateEventW(nullptr, FALSE, FALSE, channelName(pid_, L"response").c_str())),
           diskRequest_(CreateEventW(nullptr, FALSE, FALSE, channelName(pid_, L"disk-request").c_str())),
-          diskResponse_(CreateEventW(nullptr, FALSE, FALSE, channelName(pid_, L"disk-response").c_str())) {}
+          diskResponse_(CreateEventW(nullptr, FALSE, FALSE, channelName(pid_, L"disk-response").c_str())),
+          memoryRequest_(CreateEventW(nullptr, FALSE, FALSE, channelName(pid_, L"memory-request").c_str())),
+          memoryResponse_(CreateEventW(nullptr, FALSE, FALSE, channelName(pid_, L"memory-response").c_str())) {}
 
     ~SensorClient() { if (view_) UnmapViewOfFile(view_); }
 
@@ -226,6 +230,28 @@ public:
 
     void leaveDiskView() { nextDiskRead_ = {}; }
 
+    std::shared_ptr<const MemoryTimingReport> pollMemory() {
+        if (!memoryRequest_ || !memoryResponse_ || !view_) {
+            auto report = std::make_shared<MemoryTimingReport>();
+            report->reason = L"硬件采集助手尚未连接；检查安装状态、权限及助手计划任务。";
+            return report;
+        }
+        const auto now = steady_clock::now();
+        if (memoryPending_) {
+            if (WaitForSingleObject(memoryResponse_.get(), 0) == WAIT_OBJECT_0) {
+                memoryPending_ = false;
+                nextMemoryRead_ = now + 60s;
+                return memoryTimingReport(view_->memory);
+            }
+            return {};
+        }
+        if (now >= nextMemoryRead_) {
+            ResetEvent(memoryResponse_.get());
+            memoryPending_ = SetEvent(memoryRequest_.get()) != FALSE;
+        }
+        return {};
+    }
+
 private:
     bool connect() {
         if (!view_) {
@@ -246,6 +272,8 @@ private:
             helperStamp_ = stamp;
             diskPending_ = false;
             nextDiskRead_ = {};
+            memoryPending_ = false;
+            nextMemoryRead_ = {};
         }
         return true;
     }
@@ -255,10 +283,13 @@ private:
     Handle response_;
     Handle diskRequest_;
     Handle diskResponse_;
+    Handle memoryRequest_, memoryResponse_;
     SensorPage* view_{};
     CpuWord helperStamp_{};
     bool diskPending_{};
     steady_clock::time_point nextDiskRead_{};
+    bool memoryPending_{};
+    steady_clock::time_point nextMemoryRead_{};
 };
 
 int runCpuHelper() {
@@ -277,7 +308,9 @@ int runCpuHelper() {
         Handle response(OpenEventW(EVENT_MODIFY_STATE, FALSE, channelName(pid, L"response").c_str()));
         Handle diskRequest(OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, channelName(pid, L"disk-request").c_str()));
         Handle diskResponse(OpenEventW(EVENT_MODIFY_STATE, FALSE, channelName(pid, L"disk-response").c_str()));
-        if (!request || !response || !diskRequest || !diskResponse) continue;
+        Handle memoryRequest(OpenEventW(SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, channelName(pid, L"memory-request").c_str()));
+        Handle memoryResponse(OpenEventW(EVENT_MODIFY_STATE, FALSE, channelName(pid, L"memory-response").c_str()));
+        if (!request || !response || !diskRequest || !diskResponse || !memoryRequest || !memoryResponse) continue;
 
         Handle singleHelper(CreateMutexW(nullptr, FALSE, channelName(pid, L"helper").c_str()));
         if (!singleHelper || GetLastError() == ERROR_ALREADY_EXISTS) return 0;
@@ -291,6 +324,21 @@ int runCpuHelper() {
         CpuSensors sensors;
         const auto stamp = (static_cast<CpuWord>(GetCurrentProcessId()) << 32) | GetTickCount();
         std::atomic_ref<CpuWord>(view->helperStamp).store(stamp, std::memory_order_release);
+        std::jthread memoryWorker([&](std::stop_token stop) {
+            const HANDLE memoryWaits[] = {process.get(), memoryRequest.get()};
+            while (!stop.stop_requested() &&
+                WaitForMultipleObjects(2, memoryWaits, FALSE, INFINITE) == WAIT_OBJECT_0 + 1) {
+                if (stop.stop_requested()) break;
+                try {
+                    view->memory = readMemoryTimings();
+                } catch (...) {
+                    view->memory = {};
+                    view->memory.status = ReadingStatus::ReadFailed;
+                    copyLabel(view->memory.reason, L"内存时序采集异常。");
+                }
+                SetEvent(memoryResponse.get());
+            }
+        });
         std::atomic<DWORD> diskThreadId{};
         std::jthread diskWorker([&](std::stop_token stop) {
             diskThreadId.store(GetCurrentThreadId(), std::memory_order_release);
@@ -318,12 +366,15 @@ int runCpuHelper() {
             SetEvent(response.get());
         }
         diskWorker.request_stop();
+        memoryWorker.request_stop();
+        SetEvent(memoryRequest.get());
         SetEvent(diskRequest.get());
         if (const DWORD id = diskThreadId.load(std::memory_order_acquire)) {
             Handle thread(OpenThread(THREAD_TERMINATE, FALSE, id));
             if (thread) CancelSynchronousIo(thread.get());
         }
         diskWorker.join();
+        memoryWorker.join();
         UnmapViewOfFile(view);
         return 0;
     }
@@ -416,6 +467,10 @@ private:
             sample.timestampMs = timeMs();
             sensors_.update(sample);
             auto details = telemetry.details(detailPane);
+            if (detailPane == DetailPane::Memory) {
+                if (auto memory = sensors_.pollMemory()) memoryTimings_ = std::move(memory);
+                details.memoryTimings = memoryTimings_;
+            }
             std::optional<std::vector<DiskDetail>> disks;
             if (detailPane == DetailPane::Disk) {
                 disks = sensors_.pollDisks();
@@ -470,6 +525,7 @@ private:
     bool visible_;
     DetailPane detailPane_ = DetailPane::None;
     HardwareDetails hardwareDetails_;
+    std::shared_ptr<const MemoryTimingReport> memoryTimings_;
     std::optional<HardwareInventory> inventory_;
     std::uint64_t modeRevision_{};
     std::deque<Snapshot> recent_;
@@ -477,6 +533,10 @@ private:
 };
 
 int run(HINSTANCE instance, std::wstring_view arguments) {
+    constexpr std::wstring_view memoryWorkerArgument = L"--memory-timings-worker ";
+    if (arguments.starts_with(memoryWorkerArgument)) {
+        return runMemoryTimingWorker(arguments.substr(memoryWorkerArgument.size()));
+    }
     if (arguments == L"--cpu-sensors") return runCpuHelper();
 
     const bool startVisible = arguments != L"--tray";

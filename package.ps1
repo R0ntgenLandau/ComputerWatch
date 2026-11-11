@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory)]
-    [string] $LlvmMingw
+    [string] $LlvmMingw,
+    [string] $OutputDirectory
 )
 
 $ErrorActionPreference = 'Stop'
@@ -10,12 +11,15 @@ if ($versionResource -notmatch '(?m)^#define COMPUTER_WATCH_VERSION "(V\d+\.\d+\
 }
 $version = $Matches[1]
 $package = Join-Path $PSScriptRoot 'package'
+$archiveRoot = if ($OutputDirectory) { $OutputDirectory } else { $package }
+New-Item -ItemType Directory -Path $archiveRoot -Force | Out-Null
 $machineIds = @{ x86 = 0x014c; x64 = 0x8664; arm64 = 0xaa64 }
 $llvmRoot = (Resolve-Path -LiteralPath $LlvmMingw).Path
 $gcc = Get-Item -LiteralPath (Get-Command g++.exe -CommandType Application | Select-Object -First 1).Source
 $gccLicenses = Join-Path $gcc.Directory.Parent.FullName 'share/licenses'
 
 $buildRoot = Join-Path $PSScriptRoot 'build'
+& (Join-Path $PSScriptRoot 'prepare-dependencies.ps1') | Out-Null
 New-Item -ItemType Directory -Path $buildRoot -Force | Out-Null
 $pawnSource = Join-Path $buildRoot 'PawnIO.Modules-0.2.11-source.tar.gz'
 $pawnCommit = '52a7e536dff3e53c96917a28caac5e0fa6510696'
@@ -52,10 +56,17 @@ foreach ($architecture in 'x86', 'x64', 'arm64') {
     $licenses = Join-Path $staging 'licenses'
     New-Item -ItemType Directory -Path $payload, $licenses -Force | Out-Null
     Copy-Item -LiteralPath $exe.FullName, (Join-Path $exe.DirectoryName 'mcp_server.py') -Destination $payload -Force
+    if ($architecture -eq 'x64') {
+        $dependencies = Join-Path $payload 'dependencies'
+        New-Item -ItemType Directory -Path $dependencies -Force | Out-Null
+        Copy-Item -LiteralPath (Join-Path $buildRoot 'dependencies/PawnIO_setup.exe') -Destination $dependencies -Force
+    }
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'install.ps1'), (Join-Path $PSScriptRoot 'MCP.md') -Destination $staging -Force
     Copy-Item -LiteralPath (Join-Path $package 'README.md') -Destination $staging -Force
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LICENSE'), (Join-Path $PSScriptRoot 'THIRD-PARTY-NOTICES.md') -Destination $staging -Force
     Copy-Item -LiteralPath $pawnSource -Destination $licenses -Force
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'MEMORY_TIMINGS.md') -Destination $staging -Force
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'third_party/zenstates-core') -Destination $licenses -Recurse -Force
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'assets/anonymous-pro/OFL.txt') -Destination (Join-Path $licenses 'Anonymous-Pro-OFL.txt') -Force
     Copy-Item -LiteralPath (Join-Path $buildRoot $pawnLicense) -Destination (Join-Path $licenses 'PawnIO.Modules-LGPL-2.1.txt') -Force
     if ($architecture -eq 'x64') {
@@ -70,7 +81,7 @@ foreach ($architecture in 'x86', 'x64', 'arm64') {
         Copy-Item -LiteralPath (Join-Path $mingwLicenses 'COPYING.MinGW-w64-runtime.txt'), (Join-Path $mingwLicenses 'COPYING.winpthreads.txt') -Destination $licenses -Force
     }
 
-    $archive = Join-Path $package "$name.zip"
+    $archive = Join-Path $archiveRoot "$name.zip"
     Compress-Archive -LiteralPath $staging -DestinationPath $archive -Force
     Get-Item -LiteralPath $archive
 }

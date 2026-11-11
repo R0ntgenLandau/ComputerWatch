@@ -3,6 +3,7 @@
 #include "ui_controls.h"
 
 #include <commctrl.h>
+#include <commdlg.h>
 #include <dbt.h>
 #include <dwmapi.h>
 #include <shellapi.h>
@@ -13,8 +14,10 @@
 #include <array>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cwchar>
 #include <filesystem>
+#include <fstream>
 #include <initializer_list>
 #include <string>
 #include <string_view>
@@ -59,6 +62,12 @@ constexpr int DisplayListHeight = 112;
 constexpr int DisplayGamutTop = 260;
 constexpr int DisplayPageHeight = 390;
 constexpr int DisplayPlotPageHeight = 665;
+constexpr int MemorySectionsTop = 326;
+constexpr int MemorySectionsBody = 364;
+constexpr int MemoryPlotHeight = 182;
+constexpr int MemoryTimingHeight = 108;
+constexpr int MemoryDeviceHeight = 220;
+constexpr int EmptyMemorySlotHeight = 58;
 
 constexpr std::pair<const wchar_t*, int> CoreColumns[] = {
     {L"处理器组", 130}, {L"逻辑处理器", 130}, {L"占用率", 160}, {L"频率（估算）", 160}
@@ -72,8 +81,23 @@ constexpr std::pair<const wchar_t*, int> DiskColumns[] = {
 constexpr std::pair<const wchar_t*, int> DisplayColumns[] = {
     {L"序号", 36}, {L"名称", 124}, {L"信号分辨率", 94}, {L"刷新率", 76}, {L"连接类型", 106}
 };
+constexpr std::pair<const wchar_t*, int> MemoryTimingColumns[] = {
+    {L"字段", 150}, {L"读数", 70}, {L"单位", 65}, {L"状态", 110}, {L"作用范围", 210},
+    {L"采集时间", 155}, {L"来源", 270}, {L"原因 / 验证情况", 370}
+};
 
-enum class Tab { Live, History, Displays, Settings, CpuDetails, GpuDetails, DiskDetails };
+const wchar_t* readingStatus(ReadingStatus status) {
+    switch (status) {
+    case ReadingStatus::Ok: return L"ok";
+    case ReadingStatus::NotApplicable: return L"not_applicable";
+    case ReadingStatus::BackendMissing: return L"backend_missing";
+    case ReadingStatus::ReadFailed: return L"read_failed";
+    case ReadingStatus::Unverified: return L"unverified";
+    }
+    return L"read_failed";
+}
+
+enum class Tab { Live, History, Displays, Settings, CpuDetails, GpuDetails, DiskDetails, MemoryDetails };
 enum class RankField { Cpu, Memory };
 
 struct RankSort {
@@ -86,7 +110,8 @@ enum ControlId {
     HistoryPicker, RangeCombo, QueryButton, RetentionEdit, SaveButton,
     CpuDetailButton, GpuDetailButton, DiskDetailButton, DetailBackButton, CoreList, DiskList,
     LeftSortCpu, LeftSortMemory, RightSortCpu, RightSortMemory, LightThemeButton, DarkThemeButton, CopyMcpButton,
-    DisplaysButton, DisplayList, RefreshDisplaysButton
+    DisplaysButton, DisplayList, RefreshDisplaysButton, MemoryDetailButton,
+    MemoryPlotButton, MemoryTimingButton, ImportMemoryTimingButton, MemoryTimingList
 };
 
 const wchar_t* buttonCaption(unsigned id) {
@@ -97,9 +122,13 @@ const wchar_t* buttonCaption(unsigned id) {
     case RefreshDisplaysButton: return L"刷新";
     case SettingsButton: return L"设置";
     case CpuDetailButton:
+    case MemoryDetailButton:
     case GpuDetailButton: return L"详情";
     case DiskDetailButton: return L"SMART";
     case DetailBackButton: return L"返回实时监控";
+    case MemoryPlotButton: return L"展开占用率曲线";
+    case MemoryTimingButton: return L"收起硬件时序";
+    case ImportMemoryTimingButton: return L"导入报告";
     case QueryButton: return L"查看";
     case SaveButton: return L"保存";
     case LightThemeButton: return L"浅色";
@@ -139,6 +168,30 @@ std::wstring bytes(double value, bool rate = false) {
         text += L"/s";
     }
     return text;
+}
+
+std::optional<std::array<unsigned, 4>> readMemoryTimingReport(const std::filesystem::path& path) {
+    std::ifstream report(path, std::ios::binary | std::ios::ate);
+    const auto length = report.tellg();
+    if (length <= 0 || length > 16 * 1024 * 1024) return std::nullopt;
+    std::string html(static_cast<size_t>(length), '\0');
+    report.seekg(0);
+    if (!report.read(html.data(), length)) return std::nullopt;
+    const auto heading = html.find("id=\"Memory\"");
+    if (heading == std::string::npos) return std::nullopt;
+    const auto sectionStart = html.find("<HR>", heading);
+    const auto sectionEnd = html.find("</TABLE>", sectionStart);
+    const auto marker = html.find("(tCAS-tRCD-tRP-tRAS):", sectionStart);
+    if (sectionEnd == std::string::npos || marker >= sectionEnd) return std::nullopt;
+    const auto cell = html.find("<TD>", marker);
+    if (cell == std::string::npos || cell >= html.find_first_of("\r\n", marker)) return std::nullopt;
+    std::array<unsigned, 4> timing{};
+    int consumed = 0;
+    const char* reading = html.c_str() + cell + 4;
+    if (std::sscanf(reading, "%3u-%3u-%3u-%3u%n", &timing[0], &timing[1], &timing[2], &timing[3],
+        &consumed) != 4 || std::find(timing.begin(), timing.end(), 0) != timing.end()) return std::nullopt;
+    if (std::string_view("\r\n< \t").find(reading[consumed]) == std::string_view::npos) return std::nullopt;
+    return timing;
 }
 
 SYSTEMTIME localTime(int64_t timestamp) {
@@ -359,7 +412,7 @@ private:
         case WM_NOTIFY: {
             const auto notification = reinterpret_cast<const NMHDR*>(lParam);
             const int id = GetDlgCtrlID(child);
-            if ((id == CoreList || id == DiskList || id == DisplayList) && notification->code == NM_CUSTOMDRAW &&
+            if ((id == CoreList || id == DiskList || id == DisplayList || id == MemoryTimingList) && notification->code == NM_CUSTOMDRAW &&
                 notification->hwndFrom == ListView_GetHeader(child)) {
                 return dashboard.drawDetailHeader(*reinterpret_cast<NMCUSTOMDRAW*>(lParam));
             }
@@ -529,9 +582,10 @@ private:
         compactValueFont_ = readingFont_ ? font(15, FW_BOLD, ReadingFontFamily) : nullptr;
         boldFont_ = font(15, FW_SEMIBOLD);
         for (const auto child : {liveButton_, historyButton_, displaysButton_, settingsButton_, cpuCombo_, gpuCombo_, rangeCombo_,
-            cpuDetailButton_, gpuDetailButton_, diskDetailButton_, detailBackButton_, picker_, queryButton_,
+            cpuDetailButton_, memoryDetailButton_, gpuDetailButton_, diskDetailButton_, detailBackButton_, picker_, queryButton_,
+            memoryPlotButton_, memoryTimingButton_, importMemoryTimingButton_,
             retentionEdit_, saveButton_, lightThemeButton_, darkThemeButton_, copyMcpButton_, refreshDisplaysButton_,
-            coreList_, diskList_, displayList_}) {
+            coreList_, diskList_, displayList_, memoryTimingList_}) {
             if (child) SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(normalFont_), TRUE);
         }
         for (const auto child : sortButtons_) {
@@ -552,6 +606,10 @@ private:
         cpuCombo_ = combo(CpuCombo, {L"占用率 %", L"封装温度 °C", L"封装功耗 W"});
         gpuCombo_ = combo(GpuCombo, {L"占用率 %", L"温度 °C", L"板卡功耗 W"});
         cpuDetailButton_ = button(CpuDetailButton);
+        memoryDetailButton_ = button(MemoryDetailButton);
+        memoryPlotButton_ = button(MemoryPlotButton);
+        memoryTimingButton_ = button(MemoryTimingButton);
+        importMemoryTimingButton_ = button(ImportMemoryTimingButton);
         gpuDetailButton_ = button(GpuDetailButton);
         diskDetailButton_ = button(DiskDetailButton);
         detailBackButton_ = button(DetailBackButton);
@@ -584,6 +642,7 @@ private:
         coreList_ = detailList(CoreList, CoreColumns);
         diskList_ = detailList(DiskList, DiskColumns);
         displayList_ = detailList(DisplayList, DisplayColumns);
+        memoryTimingList_ = detailList(MemoryTimingList, MemoryTimingColumns);
     }
 
     void applyTheme() {
@@ -602,10 +661,10 @@ private:
         const auto nativeTheme = darkMode_ ? L"DarkMode_Explorer" : nullptr;
         SetWindowTheme(window_, nativeTheme, nullptr);
         SetWindowTheme(rankTooltip_, nativeTheme, nullptr);
-        for (const auto child : {cpuCombo_, gpuCombo_, rangeCombo_, picker_, retentionEdit_, coreList_, diskList_, displayList_}) {
+        for (const auto child : {cpuCombo_, gpuCombo_, rangeCombo_, picker_, retentionEdit_, coreList_, diskList_, displayList_, memoryTimingList_}) {
             SetWindowTheme(child, nativeTheme, nullptr);
         }
-        for (const auto list : {coreList_, diskList_, displayList_}) {
+        for (const auto list : {coreList_, diskList_, displayList_, memoryTimingList_}) {
             SetWindowTheme(ListView_GetHeader(list), darkMode_ ? L"DarkMode_ItemsView" : nullptr, nullptr);
             SendMessageW(list, LVM_SETTEXTCOLOR, 0, theme_->ink);
             SendMessageW(list, LVM_SETBKCOLOR, 0, theme_->surface);
@@ -640,6 +699,9 @@ private:
     }
 
     DetailPane detailPane() const {
+        if (tab_ == Tab::MemoryDetails) {
+            return DetailPane::Memory;
+        }
         if (tab_ == Tab::CpuDetails) {
             return DetailPane::Cpu;
         }
@@ -678,6 +740,27 @@ private:
     int displayPageHeight() const {
         const auto display = selectedDisplay();
         return display && display->gamut ? DisplayPlotPageHeight : DisplayPageHeight;
+    }
+
+    int memoryTimingTop() const {
+        return MemorySectionsBody + (memoryPlotExpanded_ ? MemoryPlotHeight : 0);
+    }
+
+    int memoryDevicesTop() const {
+        return memoryTimingTop() + (memoryTimingExpanded_ ? currentMemoryTimingHeight() + MemoryTimingHeight : 0);
+    }
+
+    int currentMemoryTimingHeight() const {
+        return details_.memoryTimings && !details_.memoryTimings->fields.empty() ? 310 : 144;
+    }
+
+    int memoryPageHeight() const {
+        int height = memoryDevicesTop() + PageInset;
+        if (!inventory_ || inventory_->memoryDevices.empty()) return height + 34;
+        for (const auto& device : inventory_->memoryDevices) {
+            height += device.empty ? EmptyMemorySlotHeight : MemoryDeviceHeight;
+        }
+        return height;
     }
 
     const std::vector<std::wstring>& modelList(size_t card) const {
@@ -732,7 +815,7 @@ private:
         const bool overview = live || history;
         const int contentBottom = overview ? rankPanel(area, 1).bottom + pad :
             px(settings ? McpCardBottom + PageInset : tab_ == Tab::Displays ? displayPageHeight() :
-                detail == DetailPane::Gpu ? 446 : 390);
+                detail == DetailPane::Memory ? memoryPageHeight() : detail == DetailPane::Gpu ? 446 : 390);
         scrollMax_ = std::max(0, contentBottom - static_cast<int>(area.bottom));
         scroll_ = std::clamp(scroll_, 0, scrollMax_);
         const SCROLLINFO scrollInfo{sizeof(SCROLLINFO), SIF_RANGE | SIF_PAGE | SIF_POS,
@@ -756,6 +839,16 @@ private:
         move(cpuCombo_, cards_[0].left + px(CardInset), cards_[0].top + px(CardTools), px(125), px(125), overview);
         move(gpuCombo_, cards_[3].left + px(CardInset), cards_[3].top + px(CardTools), px(125), px(125), overview);
         move(cpuDetailButton_, cards_[0].right - px(CardInset + 46), cards_[0].top + px(12), px(46), px(24), live);
+        move(memoryDetailButton_, cards_[1].right - px(CardInset + 46), cards_[1].top + px(12), px(46), px(24), live);
+        move(memoryPlotButton_, pad, px(MemorySectionsTop), px(130), px(28), detail == DetailPane::Memory);
+        move(memoryTimingButton_, pad + px(138), px(MemorySectionsTop), px(118), px(28), detail == DetailPane::Memory);
+        move(importMemoryTimingButton_, area.right - pad - px(86),
+            px(memoryTimingTop() + currentMemoryTimingHeight() + 10), px(74), px(26),
+            detail == DetailPane::Memory && memoryTimingExpanded_);
+        move(memoryTimingList_, pad + px(12), px(memoryTimingTop() + 132),
+            static_cast<int>(area.right) - 2 * pad - px(24), px(160),
+            detail == DetailPane::Memory && memoryTimingExpanded_ &&
+            details_.memoryTimings && !details_.memoryTimings->fields.empty());
         move(gpuDetailButton_, cards_[3].right - px(CardInset + 46), cards_[3].top + px(12), px(46), px(24), live);
         move(diskDetailButton_, cards_[2].right - px(CardInset + 60), cards_[2].top + px(12), px(60), px(24), live);
         move(picker_, pad + px(70), px(78) + extra, px(202), px(27), history);
@@ -914,9 +1007,15 @@ private:
     void replaceDetails(HardwareDetails details) {
         const size_t previousCores = details_.cores.size();
         const size_t previousDisks = details_.disks.size();
+        const size_t previousTimings = details_.memoryTimings ? details_.memoryTimings->fields.size() : 0;
         details_ = std::move(details);
         updateDetailList(coreList_, previousCores, details_.cores.size(), detailPane() == DetailPane::Cpu);
         updateDetailList(diskList_, previousDisks, details_.disks.size(), detailPane() == DetailPane::Disk);
+        updateDetailList(memoryTimingList_, previousTimings,
+            details_.memoryTimings ? details_.memoryTimings->fields.size() : 0,
+            detailPane() == DetailPane::Memory && memoryTimingExpanded_);
+        if (detailPane() == DetailPane::Memory && previousTimings !=
+            (details_.memoryTimings ? details_.memoryTimings->fields.size() : 0)) layout();
     }
 
     void refreshDisplays() {
@@ -962,7 +1061,7 @@ private:
     void refreshLive() {
         if (!inventory_ && callbacks_.inventory) {
             inventory_ = callbacks_.inventory();
-            if (inventory_ && tab_ == Tab::Live) layout();
+            if (inventory_ && (tab_ == Tab::Live || tab_ == Tab::MemoryDetails)) layout();
         }
         try {
             live_ = callbacks_.live ? callbacks_.live() : std::vector<Snapshot>{};
@@ -1001,6 +1100,19 @@ private:
     }
 
     std::wstring detailListValue(HWND list, size_t row, int column) const {
+        if (list == memoryTimingList_ && details_.memoryTimings && row < details_.memoryTimings->fields.size()) {
+            const auto& field = details_.memoryTimings->fields[row];
+            switch (column) {
+            case 0: return field.name;
+            case 1: return decimal(field.value.value_or(Missing), field.unit == L"ratio" ? 3 : 0, L"");
+            case 2: return field.unit;
+            case 3: return readingStatus(field.status);
+            case 4: return field.scope;
+            case 5: return field.sampledAtMs ? timeText(field.sampledAtMs, true) : L"—";
+            case 6: return field.source;
+            case 7: return field.reason;
+            }
+        }
         if (list == coreList_ && row < details_.cores.size()) {
             const auto& core = details_.cores[row];
             switch (column) {
@@ -1090,10 +1202,19 @@ private:
     }
 
     void clickChart(int x, int y) {
+        const POINT point{x, y};
+        if (tab_ == Tab::Live) {
+            const auto chart = chartRect(cards_[1]);
+            if (PtInRect(&chart, point)) {
+                memoryPlotExpanded_ = true;
+                updateMemorySections();
+                activate(Tab::MemoryDetails);
+            }
+            return;
+        }
         if (tab_ != Tab::History || history_.empty()) {
             return;
         }
-        const POINT point{x, y};
         for (const auto& card : cards_) {
             const auto chart = chartRect(card);
             if (!PtInRect(&chart, point)) {
@@ -1113,6 +1234,40 @@ private:
             invalidate();
             break;
         }
+    }
+
+    void updateMemorySections() {
+        SetWindowTextW(memoryPlotButton_, memoryPlotExpanded_ ? L"收起占用率曲线" : L"展开占用率曲线");
+        SetWindowTextW(memoryTimingButton_, memoryTimingExpanded_ ? L"收起硬件时序" : L"展开硬件时序");
+        layout();
+        invalidate();
+    }
+
+    void importMemoryTiming() {
+        wchar_t path[32768]{};
+        OPENFILENAMEW picker{};
+        picker.lStructSize = sizeof(picker);
+        picker.hwndOwner = window_;
+        picker.lpstrFilter = L"HWiNFO HTML 报告\0*.htm;*.html\0\0";
+        picker.lpstrFile = path;
+        picker.nMaxFile = std::size(path);
+        picker.lpstrTitle = L"选择本机 HWiNFO HTML 报告";
+        picker.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        if (!GetOpenFileNameW(&picker)) return;
+        try {
+            memoryTiming_ = readMemoryTimingReport(path);
+        } catch (const std::exception&) {
+            memoryTiming_.reset();
+        }
+        memoryTimingSource_ = memoryTiming_ ? L"HWiNFO 报告" : L"报告中没有可读取的主时序。";
+        WIN32_FILE_ATTRIBUTE_DATA attributes{};
+        if (memoryTiming_ && GetFileAttributesExW(path, GetFileExInfoStandard, &attributes)) {
+            const auto& time = attributes.ftLastWriteTime;
+            const ULARGE_INTEGER stamp{{time.dwLowDateTime, time.dwHighDateTime}};
+            const auto ms = static_cast<int64_t>(stamp.QuadPart / 10000) - EpochOffset / 10000;
+            memoryTimingSource_ += L" · 文件时间 " + timeText(ms, true);
+        }
+        invalidate();
     }
 
     void activate(Tab target) {
@@ -1266,6 +1421,7 @@ private:
             scaleColumns(coreList_, CoreColumns);
             scaleColumns(diskList_, DiskColumns);
             scaleColumns(displayList_, DisplayColumns);
+            scaleColumns(memoryTimingList_, MemoryTimingColumns);
             const auto& bounds = *reinterpret_cast<const RECT*>(lParam);
             SetWindowPos(window_, nullptr, bounds.left, bounds.top,
                 bounds.right - bounds.left, bounds.bottom - bounds.top, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -1343,6 +1499,16 @@ private:
             case QueryButton: queryHistory(); break;
             case SaveButton: saveSettings(); break;
             case CpuDetailButton: activate(Tab::CpuDetails); break;
+            case MemoryDetailButton: activate(Tab::MemoryDetails); break;
+            case MemoryPlotButton:
+                memoryPlotExpanded_ = !memoryPlotExpanded_;
+                updateMemorySections();
+                break;
+            case MemoryTimingButton:
+                memoryTimingExpanded_ = !memoryTimingExpanded_;
+                updateMemorySections();
+                break;
+            case ImportMemoryTimingButton: importMemoryTiming(); break;
             case GpuDetailButton: activate(Tab::GpuDetails); break;
             case DiskDetailButton: activate(Tab::DiskDetails); break;
             case DetailBackButton: activate(Tab::Live); break;
@@ -1395,7 +1561,7 @@ private:
                 return 0;
             }
             if (notification->hwndFrom != coreList_ && notification->hwndFrom != diskList_ &&
-                notification->hwndFrom != displayList_) {
+                notification->hwndFrom != displayList_ && notification->hwndFrom != memoryTimingList_) {
                 break;
             }
             if (notification->code == LVN_GETDISPINFOW) {
@@ -1512,7 +1678,7 @@ private:
         POINT previousPoint{};
         bool previous = false;
         int64_t previousTime = 0;
-        const auto maxGap = tab_ == Tab::Live ? 7'500 : std::max<int64_t>(
+        const auto maxGap = tab_ != Tab::History ? 7'500 : std::max<int64_t>(
             7'500, 4 * (end - start) / static_cast<int64_t>(std::max<size_t>(samples.size(), 1)));
         for (const auto& sample : samples) {
             if (sample.timestampMs < start || sample.timestampMs > end) {
@@ -1633,7 +1799,7 @@ private:
         case 1:
             primary = decimal(value(snapshot, Metric::MemoryPercent), 1, L"%");
             detail = bytes(value(snapshot, Metric::MemoryUsed)) + L" / " + bytes(value(snapshot, Metric::MemoryTotal));
-            firstLegend = L"占用率 %";
+            firstLegend = tab_ == Tab::Live ? L"占用率 % · 展开" : L"占用率 %";
             break;
         case 2:
             primary = bytes(value(snapshot, Metric::DiskUsed));
@@ -1837,6 +2003,122 @@ private:
             {left + px(122), px(221), right - px(14), px(249)}, theme_->muted, DT_RIGHT);
         if (details_.cores.empty()) {
             label(dc, normalFont_, L"暂无逻辑处理器明细。", {left + px(12), px(256), right - px(12), px(286)}, theme_->muted);
+        }
+    }
+
+    void paintMemoryFields(HDC dc, RECT area,
+        std::initializer_list<std::pair<const wchar_t*, std::wstring>> fields) const {
+        const int middle = area.left + (area.right - area.left) / 2;
+        const int rowHeight = px(22);
+        int index = 0;
+        for (const auto& [title, reading] : fields) {
+            const int left = index % 2 == 0 ? area.left : middle;
+            const int right = (index % 2 == 0 ? middle : area.right) - px(10);
+            const int top = area.top + index / 2 * rowHeight;
+            const int valueLeft = left + px(96);
+            label(dc, smallFont_, title, {left, top, valueLeft - px(5), top + rowHeight}, theme_->secondary);
+            label(dc, smallFont_, reading.empty() ? L"—" : reading,
+                {valueLeft, top, right, top + rowHeight});
+            ++index;
+        }
+    }
+
+    void paintMemoryDetails(HDC dc, RECT area, const Snapshot* snapshot) const {
+        const int left = px(PageInset);
+        const int right = area.right - left;
+        const auto total = value(snapshot, Metric::MemoryTotal);
+        const auto used = value(snapshot, Metric::MemoryUsed);
+        const auto installed = inventory_ ? inventory_->installedMemory : Missing;
+        label(dc, titleFont_, L"内存实时详情", {left, px(83), right, px(120)});
+        paintDetailSummary(dc, {left, px(125), right, px(196)}, {
+            {L"内存占用率", decimal(value(snapshot, Metric::MemoryPercent), 1, L"%")},
+            {L"已用 / 系统可见", bytes(used) + L" / " + bytes(total)},
+            {L"可用内存", bytes(total - used)}
+        });
+        const auto& memory = details_.memory;
+        rounded(dc, {left, px(206), right, px(318)}, px(14), theme_->surface, theme_->border);
+        paintMemoryFields(dc, {left + px(12), px(207), right - px(4), px(318)}, {
+            {L"已安装容量", bytes(installed)}, {L"硬件保留（估算）", bytes(installed - total)},
+            {L"已提交", bytes(memory.committed)}, {L"提交上限", bytes(memory.commitLimit)},
+            {L"提交峰值", bytes(memory.commitPeak)}, {L"系统缓存", bytes(memory.cache)},
+            {L"分页池", bytes(memory.pagedPool)}, {L"非分页池", bytes(memory.nonpagedPool)},
+            {L"页面大小", bytes(memory.pageSize)}
+        });
+
+        if (memoryPlotExpanded_) {
+            const int top = MemorySectionsBody;
+            const auto end = nowMs();
+            const auto start = end - MinuteMs;
+            rounded(dc, {left, px(top), right, px(top + MemoryPlotHeight - 8)}, px(14), theme_->surface, theme_->border);
+            label(dc, boldFont_, L"最近 60 秒 · 内存占用率", {left + px(12), px(top + 4), right - px(12), px(top + 28)});
+            const RECT graph{left + px(55), px(top + 31), right - px(12), px(top + 148)};
+            paintChart(dc, graph, chartFor(1), live_, start, end, theme_->cardColors[1]);
+            const auto plot = chartPlot(graph);
+            for (const auto& [caption, y] : {std::pair{L"100%", plot.top},
+                {L"50%", (plot.top + plot.bottom) / 2}, {L"0%", plot.bottom}}) {
+                label(dc, smallFont_, caption, {left + px(8), y - px(10), plot.left - px(5), y + px(10)},
+                    theme_->secondary, DT_RIGHT);
+            }
+            label(dc, smallFont_, timeText(start), {plot.left, plot.bottom, plot.right, plot.bottom + px(22)}, theme_->secondary);
+            label(dc, smallFont_, timeText(end), {plot.left, plot.bottom, plot.right, plot.bottom + px(22)}, theme_->secondary, DT_RIGHT);
+        }
+        if (memoryTimingExpanded_) {
+            const int currentTop = memoryTimingTop();
+            rounded(dc, {left, px(currentTop), right, px(currentTop + currentMemoryTimingHeight() - 8)},
+                px(14), theme_->surface, theme_->border);
+            const auto report = details_.memoryTimings;
+            const auto title = std::wstring(L"自动采集 · 当前运行配置") +
+                (report ? L" · " + std::wstring(readingStatus(report->status)) : L"");
+            label(dc, boldFont_, title, {left + px(12), px(currentTop + 5), right - px(12), px(currentTop + 29)});
+            label(dc, smallFont_, report ? report->platform : L"正在请求硬件采集助手…",
+                {left + px(12), px(currentTop + 31), right - px(12), px(currentTop + 53)}, theme_->secondary);
+            label(dc, smallFont_, report ? report->backend : L"",
+                {left + px(12), px(currentTop + 54), right - px(12), px(currentTop + 76)}, theme_->secondary);
+            paragraph(dc, smallFont_, report ? report->reason : L"底层采集在独立进程执行，超时 5 秒。",
+                {left + px(12), px(currentTop + 78), right - px(12), px(currentTop + 128)}, theme_->secondary);
+            const int top = currentTop + currentMemoryTimingHeight();
+            rounded(dc, {left, px(top), right, px(top + MemoryTimingHeight - 8)}, px(14), theme_->surface, theme_->border);
+            label(dc, boldFont_, L"历史报告 · 备用对照", {left + px(12), px(top + 6), right - px(100), px(top + 30)});
+            const auto timing = [&](size_t index) { return memoryTiming_ ? std::to_wstring((*memoryTiming_)[index]) : L"—"; };
+            paintMemoryFields(dc, {left + px(12), px(top + 31), right - px(4), px(top + 75)}, {
+                {L"CL / tCAS", timing(0)}, {L"tRCD", timing(1)}, {L"tRP", timing(2)}, {L"tRAS", timing(3)}
+            });
+            label(dc, smallFont_, memoryTimingSource_,
+                {left + px(12), px(top + 75), right - px(12), px(top + 95)}, theme_->secondary);
+        }
+
+        int top = memoryDevicesTop();
+        if (!inventory_ || inventory_->memoryDevices.empty()) {
+            label(dc, normalFont_, inventory_ ? L"固件未提供内存设备信息。" : L"正在读取内存设备…",
+                {left, px(top), right, px(top + 30)}, theme_->secondary);
+            return;
+        }
+        for (const auto& device : inventory_->memoryDevices) {
+            const int height = device.empty ? EmptyMemorySlotHeight : MemoryDeviceHeight;
+            rounded(dc, {left, px(top), right, px(top + height - 8)}, px(14), theme_->surface, theme_->border);
+            const auto title = device.slot + (device.empty ? L" · 空插槽" : L"");
+            label(dc, boldFont_, title, {left + px(12), px(top + 4), right - px(12), px(top + 29)});
+            const auto speedUnit = device.legacySpeed ? L"（固件原值）" : L" MT/s";
+            if (device.empty) {
+                paintMemoryFields(dc, {left + px(12), px(top + 24), right - px(4), px(top + height)},
+                    {{L"存储体", device.bank}});
+            } else {
+                paintMemoryFields(dc, {left + px(12), px(top + 30), right - px(4), px(top + height)}, {
+                    {L"容量", bytes(device.capacity)}, {L"存储体", device.bank},
+                    {L"制造商", device.manufacturer}, {L"部件型号", device.partNumber},
+                    {L"序列号", device.serialNumber}, {L"资产标签", device.assetTag},
+                    {L"内存类型", device.type}, {L"封装形态", device.formFactor},
+                    {L"标称速率", decimal(device.ratedSpeed, 0, speedUnit)},
+                    {L"配置速率", decimal(device.configuredSpeed, 0, speedUnit)},
+                    {L"数据位宽", decimal(device.dataWidth, 0, L" bit")},
+                    {L"总位宽", decimal(device.totalWidth, 0, L" bit")},
+                    {L"Rank 数量", decimal(device.ranks, 0, L"")},
+                    {L"配置电压", decimal(device.configuredVolts, 3, L" V")},
+                    {L"最低电压", decimal(device.minVolts, 3, L" V")},
+                    {L"最高电压", decimal(device.maxVolts, 3, L" V")}
+                });
+            }
+            top += height;
         }
     }
 
@@ -2057,6 +2339,7 @@ private:
         area.bottom = std::max(static_cast<int>(area.bottom), px(390));
         switch (detailPane()) {
         case DetailPane::Cpu: paintCpuDetails(dc, area, snapshot); return;
+        case DetailPane::Memory: paintMemoryDetails(dc, area, snapshot); return;
         case DetailPane::Gpu: paintGpuDetails(dc, area, snapshot); return;
         case DetailPane::Disk: paintDiskDetails(dc, area); return;
         case DetailPane::None: break;
@@ -2113,7 +2396,12 @@ private:
     HWND picker_{}, rangeCombo_{}, queryButton_{}, retentionEdit_{}, saveButton_{};
     HWND lightThemeButton_{}, darkThemeButton_{};
     HWND copyMcpButton_{};
-    HWND cpuDetailButton_{}, gpuDetailButton_{}, diskDetailButton_{}, detailBackButton_{};
+    HWND cpuDetailButton_{}, memoryDetailButton_{}, gpuDetailButton_{}, diskDetailButton_{}, detailBackButton_{};
+    HWND memoryPlotButton_{}, memoryTimingButton_{}, importMemoryTimingButton_{};
+    HWND memoryTimingList_{};
+    bool memoryPlotExpanded_{}, memoryTimingExpanded_ = true;
+    std::optional<std::array<unsigned, 4>> memoryTiming_;
+    std::wstring memoryTimingSource_ = L"导入本机 HWiNFO HTML 报告以查看时序。";
     HWND coreList_{}, diskList_{}, rankTooltip_{};
     struct RankTip { RECT bounds{}; std::wstring text; };
     mutable std::array<RankTip, 2 * TopCount> rankTips_{};
