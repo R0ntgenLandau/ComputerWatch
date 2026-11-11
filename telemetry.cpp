@@ -336,7 +336,8 @@ class NvidiaGpu {
     using Device = void*;
     using GetDevice = int (*)(unsigned int, Device*);
     using GetTemperature = int (*)(Device, unsigned int, unsigned int*);
-    using GetPower = int (*)(Device, unsigned int*);
+    using GetUnsigned = int (*)(Device, unsigned int*);
+    using GetEngineUtilization = int (*)(Device, unsigned int*, unsigned int*);
     struct Utilization { unsigned int gpu, memory; };
     using GetUtilization = int (*)(Device, Utilization*);
     struct Memory { unsigned long long total, free, used; };
@@ -366,7 +367,13 @@ public:
             return;
         }
         getTemperature_ = resolve<GetTemperature>(module_, "nvmlDeviceGetTemperature");
-        getPower_ = resolve<GetPower>(module_, "nvmlDeviceGetPowerUsage");
+        getPower_ = resolve<GetUnsigned>(module_, "nvmlDeviceGetPowerUsage");
+        getPowerLimit_ = resolve<GetUnsigned>(module_, "nvmlDeviceGetEnforcedPowerLimit");
+        getPerformanceState_ = resolve<GetUnsigned>(module_, "nvmlDeviceGetPerformanceState");
+        getPcieGeneration_ = resolve<GetUnsigned>(module_, "nvmlDeviceGetCurrPcieLinkGeneration");
+        getPcieWidth_ = resolve<GetUnsigned>(module_, "nvmlDeviceGetCurrPcieLinkWidth");
+        getEncoderUtilization_ = resolve<GetEngineUtilization>(module_, "nvmlDeviceGetEncoderUtilization");
+        getDecoderUtilization_ = resolve<GetEngineUtilization>(module_, "nvmlDeviceGetDecoderUtilization");
         getUtilization_ = resolve<GetUtilization>(module_, "nvmlDeviceGetUtilizationRates");
         getMemory_ = resolve<GetMemory>(module_, "nvmlDeviceGetMemoryInfo");
         getClock_ = resolve<GetClock>(module_, "nvmlDeviceGetClockInfo");
@@ -418,9 +425,25 @@ public:
     void details(HardwareDetails& details) {
         if (!device_)
             return;
+        Utilization utilization{};
+        if (getUtilization_ && getUtilization_(device_, &utilization) == 0)
+            details.gpuMemoryActivity = utilization.memory;
+        unsigned int value{}, samplingPeriodUs{};
+        if (getEncoderUtilization_ && getEncoderUtilization_(device_, &value, &samplingPeriodUs) == 0)
+            details.gpuEncoderPercent = value;
+        if (getDecoderUtilization_ && getDecoderUtilization_(device_, &value, &samplingPeriodUs) == 0)
+            details.gpuDecoderPercent = value;
+        if (getPowerLimit_ && getPowerLimit_(device_, &value) == 0)
+            details.gpuPowerLimitWatts = value / 1000.0;
+        if (getPerformanceState_ && getPerformanceState_(device_, &value) == 0 && value <= 15)
+            details.gpuPerformanceState = value;
+        if (getPcieGeneration_ && getPcieGeneration_(device_, &value) == 0)
+            details.gpuPcieGeneration = value;
+        if (getPcieWidth_ && getPcieWidth_(device_, &value) == 0)
+            details.gpuPcieWidth = value;
+
         constexpr unsigned int graphicsClock = 0; // NVML_CLOCK_GRAPHICS
         constexpr unsigned int memoryClock = 2;   // NVML_CLOCK_MEM
-        unsigned int value{};
         if (getClock_ && getClock_(device_, graphicsClock, &value) == 0)
             details.gpuCoreMhz = value;
         if (getClock_ && getClock_(device_, memoryClock, &value) == 0)
@@ -475,7 +498,13 @@ private:
     bool initialized_{};
     Shutdown shutdown_{};
     GetTemperature getTemperature_{};
-    GetPower getPower_{};
+    GetUnsigned getPower_{};
+    GetUnsigned getPowerLimit_{};
+    GetUnsigned getPerformanceState_{};
+    GetUnsigned getPcieGeneration_{};
+    GetUnsigned getPcieWidth_{};
+    GetEngineUtilization getEncoderUtilization_{};
+    GetEngineUtilization getDecoderUtilization_{};
     GetUtilization getUtilization_{};
     GetMemory getMemory_{};
     GetClock getClock_{};

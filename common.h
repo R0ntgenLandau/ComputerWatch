@@ -115,6 +115,13 @@ struct HardwareDetails {
     double gpuFanPercent = Missing;
     double gpuFanRpm = Missing;
     double gpuHotspotC = Missing;
+    double gpuMemoryActivity = Missing;
+    double gpuEncoderPercent = Missing;
+    double gpuDecoderPercent = Missing;
+    double gpuPowerLimitWatts = Missing;
+    double gpuPerformanceState = Missing;
+    double gpuPcieGeneration = Missing;
+    double gpuPcieWidth = Missing;
     bool gpuLimitsAvailable{};
     bool gpuThermalLimited{};
     bool gpuPowerLimited{};

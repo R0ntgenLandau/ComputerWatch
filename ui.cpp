@@ -92,6 +92,7 @@ constexpr int DiskSummaryTop = 157;
 constexpr int DiskSummaryHeight = 112;
 constexpr int DiskSmartTop = 347;
 constexpr int DiskPageHeight = 535;
+constexpr int GpuPageHeight = 583;
 
 const wchar_t* readingStatus(ReadingStatus status) {
     switch (status) {
@@ -818,7 +819,7 @@ private:
         const int contentBottom = overview ? rankPanel(area, 1).bottom + pad :
             px(settings ? McpCardBottom + PageInset : tab_ == Tab::Displays ? displayPageHeight() :
                 detail == DetailPane::Memory ? memoryPageHeight() : detail == DetailPane::Disk ? DiskPageHeight :
-                detail == DetailPane::Gpu ? 446 : 390);
+                detail == DetailPane::Gpu ? GpuPageHeight : 390);
         scrollMax_ = std::max(0, contentBottom - static_cast<int>(area.bottom));
         scroll_ = std::clamp(scroll_, 0, scrollMax_);
         const SCROLLINFO scrollInfo{sizeof(SCROLLINFO), SIF_RANGE | SIF_PAGE | SIF_POS,
@@ -2057,7 +2058,7 @@ private:
         }
     }
 
-    void paintMemoryFields(HDC dc, RECT area,
+    void paintDetailFields(HDC dc, RECT area,
         std::initializer_list<std::pair<const wchar_t*, std::wstring>> fields) const {
         const int middle = area.left + (area.right - area.left) / 2;
         const int rowHeight = px(22);
@@ -2088,7 +2089,7 @@ private:
         });
         const auto& memory = details_.memory;
         rounded(dc, {left, px(206), right, px(318)}, px(14), theme_->surface, theme_->border);
-        paintMemoryFields(dc, {left + px(12), px(207), right - px(4), px(318)}, {
+        paintDetailFields(dc, {left + px(12), px(207), right - px(4), px(318)}, {
             {L"已安装容量", bytes(installed)}, {L"硬件保留（估算）", bytes(installed - total)},
             {L"已提交", bytes(memory.committed)}, {L"提交上限", bytes(memory.commitLimit)},
             {L"提交峰值", bytes(memory.commitPeak)}, {L"系统缓存", bytes(memory.cache)},
@@ -2131,7 +2132,7 @@ private:
             rounded(dc, {left, px(top), right, px(top + MemoryTimingHeight - 8)}, px(14), theme_->surface, theme_->border);
             label(dc, boldFont_, L"历史报告 · 备用对照", {left + px(12), px(top + 6), right - px(100), px(top + 30)});
             const auto timing = [&](size_t index) { return memoryTiming_ ? std::to_wstring((*memoryTiming_)[index]) : L"—"; };
-            paintMemoryFields(dc, {left + px(12), px(top + 31), right - px(4), px(top + 75)}, {
+            paintDetailFields(dc, {left + px(12), px(top + 31), right - px(4), px(top + 75)}, {
                 {L"CL / tCAS", timing(0)}, {L"tRCD", timing(1)}, {L"tRP", timing(2)}, {L"tRAS", timing(3)}
             });
             label(dc, smallFont_, memoryTimingSource_,
@@ -2151,10 +2152,10 @@ private:
             label(dc, boldFont_, title, {left + px(12), px(top + 4), right - px(12), px(top + 29)});
             const auto speedUnit = device.legacySpeed ? L"（固件原值）" : L" MT/s";
             if (device.empty) {
-                paintMemoryFields(dc, {left + px(12), px(top + 24), right - px(4), px(top + height)},
+                paintDetailFields(dc, {left + px(12), px(top + 24), right - px(4), px(top + height)},
                     {{L"存储体", device.bank}});
             } else {
-                paintMemoryFields(dc, {left + px(12), px(top + 30), right - px(4), px(top + height)}, {
+                paintDetailFields(dc, {left + px(12), px(top + 30), right - px(4), px(top + height)}, {
                     {L"容量", bytes(device.capacity)}, {L"存储体", device.bank},
                     {L"制造商", device.manufacturer}, {L"部件型号", device.partNumber},
                     {L"序列号", device.serialNumber}, {L"资产标签", device.assetTag},
@@ -2174,35 +2175,45 @@ private:
     }
 
     void paintGpuDetails(HDC dc, RECT area, const Snapshot* snapshot) const {
-        const int left = px(24);
+        const int left = px(PageInset);
         const int right = area.right - left;
-        label(dc, titleFont_, L"显卡实时详情", {left, px(83), right, px(120)});
-        paintDetailSummary(dc, {left, px(130), right, px(205)}, {
+        label(dc, titleFont_, L"显卡实时详情", {left, px(83), right, px(113)});
+        if (inventory_ && !inventory_->sampledGpu.empty()) {
+            label(dc, smallFont_, inventory_->sampledGpu, {left, px(113), right, px(135)}, theme_->secondary);
+        }
+        paintDetailSummary(dc, {left, px(138), right, px(213)}, {
             {L"GPU 占用率", decimal(value(snapshot, Metric::GpuPercent), 1, L"%")},
             {L"GPU 温度", decimal(value(snapshot, Metric::GpuTemp), 0, L" °C")},
-            {L"板卡功耗", decimal(value(snapshot, Metric::GpuWatts), 1, L" W")},
-            {L"显存已用 / 总量", bytes(value(snapshot, Metric::GpuMemoryUsed)) + L" / " + bytes(value(snapshot, Metric::GpuMemoryTotal))}
+            {L"板卡功耗", decimal(value(snapshot, Metric::GpuWatts), 1, L" W")}
         });
-        rounded(dc, {left, px(217), right, px(422)}, px(22), theme_->surface, theme_->border);
-        label(dc, boldFont_, L"时钟与散热", {left + px(12), px(221), right - px(12), px(249)});
-        const std::pair<const wchar_t*, std::wstring> fields[] = {
+        const auto section = [&](int top, int bottom, const wchar_t* title,
+            std::initializer_list<std::pair<const wchar_t*, std::wstring>> fields) {
+            rounded(dc, {left, px(top), right, px(bottom)}, px(14), theme_->surface, theme_->border);
+            label(dc, boldFont_, title, {left + px(12), px(top + 4), right - px(12), px(top + 30)});
+            paintDetailFields(dc, {left + px(12), px(top + 31), right - px(4), px(bottom)}, fields);
+        };
+        section(225, 328, L"显存与视频", {
+            {L"显存已用 / 总量", bytes(value(snapshot, Metric::GpuMemoryUsed)) + L" / " + bytes(value(snapshot, Metric::GpuMemoryTotal))},
+            {L"显存读写活跃度", decimal(details_.gpuMemoryActivity, 0, L"%")},
+            {L"视频编码占用率", decimal(details_.gpuEncoderPercent, 0, L"%")},
+            {L"视频解码占用率", decimal(details_.gpuDecoderPercent, 0, L"%")}
+        });
+        section(340, 443, L"频率与散热", {
             {L"核心频率", decimal(details_.gpuCoreMhz, 0, L" MHz")},
             {L"显存频率", decimal(details_.gpuMemoryMhz, 0, L" MHz")},
             {L"风扇设定转速", decimal(details_.gpuFanRpm, 0, L" RPM")},
             {L"风扇设定比例", decimal(details_.gpuFanPercent, 0, L"%")},
             {L"热点温度", decimal(details_.gpuHotspotC, 0, L" °C")},
-            {L"温度限制", details_.gpuLimitsAvailable ? (details_.gpuThermalLimited ? L"已触发" : L"未触发") : L"—"},
-            {L"功耗限制", details_.gpuLimitsAvailable ? (details_.gpuPowerLimited ? L"已触发" : L"未触发") : L"—"}
-        };
-        const int width = (right - left - px(24)) / 2;
-        for (int i = 0; i < static_cast<int>(std::size(fields)); ++i) {
-            const int x = left + px(12) + (i % 2) * width;
-            const int y = px(256 + 37 * (i / 2));
-            const auto& [title, reading] = fields[i];
-            rounded(dc, {x, y, x + width - px(10), y + px(30)}, px(8), theme_->chartBg, theme_->chartBg);
-            label(dc, normalFont_, title, {x + px(8), y, x + width / 2, y + px(30)}, theme_->secondary);
-            label(dc, normalFont_, reading, {x + width / 2, y, x + width - px(18), y + px(30)}, theme_->ink, DT_RIGHT);
-        }
+            {L"温度限制", details_.gpuLimitsAvailable ? (details_.gpuThermalLimited ? L"已触发" : L"未触发") : L"—"}
+        });
+        section(455, GpuPageHeight - PageInset, L"功耗与当前 PCIe 链路", {
+            {L"生效功耗上限", decimal(details_.gpuPowerLimitWatts, 1, L" W")},
+            {L"功耗限制", details_.gpuLimitsAvailable ? (details_.gpuPowerLimited ? L"已触发" : L"未触发") : L"—"},
+            {L"性能状态", std::isfinite(details_.gpuPerformanceState)
+                ? L"P" + decimal(details_.gpuPerformanceState, 0, L"") : L"—"},
+            {L"PCIe 代际", decimal(details_.gpuPcieGeneration, 0, L"")},
+            {L"PCIe 通道数", decimal(details_.gpuPcieWidth, 0, L"")}
+        });
     }
 
     void paintDiskDetails(HDC dc, RECT area) const {
