@@ -1,7 +1,9 @@
 #include "ui.h"
+#include "display_info.h"
 #include "ui_controls.h"
 
 #include <commctrl.h>
+#include <dbt.h>
 #include <dwmapi.h>
 #include <shellapi.h>
 #include <uxtheme.h>
@@ -52,6 +54,11 @@ constexpr int RankCpuWidth = 72;
 constexpr int RankMemoryWidth = 92;
 constexpr int RankHeaderOffset = 38;
 constexpr int RankHeaderHeight = 26;
+constexpr int DisplayListTop = 132;
+constexpr int DisplayListHeight = 112;
+constexpr int DisplayGamutTop = 260;
+constexpr int DisplayPageHeight = 390;
+constexpr int DisplayPlotPageHeight = 665;
 
 constexpr std::pair<const wchar_t*, int> CoreColumns[] = {
     {L"处理器组", 130}, {L"逻辑处理器", 130}, {L"占用率", 160}, {L"频率（估算）", 160}
@@ -62,7 +69,11 @@ constexpr std::pair<const wchar_t*, int> DiskColumns[] = {
     {L"不可纠正 / 介质错误", 154}
 };
 
-enum class Tab { Live, History, Settings, CpuDetails, GpuDetails, DiskDetails };
+constexpr std::pair<const wchar_t*, int> DisplayColumns[] = {
+    {L"序号", 36}, {L"名称", 124}, {L"信号分辨率", 94}, {L"刷新率", 76}, {L"连接类型", 106}
+};
+
+enum class Tab { Live, History, Displays, Settings, CpuDetails, GpuDetails, DiskDetails };
 enum class RankField { Cpu, Memory };
 
 struct RankSort {
@@ -74,13 +85,16 @@ enum ControlId {
     LiveButton = 100, HistoryButton, SettingsButton, CpuCombo, GpuCombo,
     HistoryPicker, RangeCombo, QueryButton, RetentionEdit, SaveButton,
     CpuDetailButton, GpuDetailButton, DiskDetailButton, DetailBackButton, CoreList, DiskList,
-    LeftSortCpu, LeftSortMemory, RightSortCpu, RightSortMemory, LightThemeButton, DarkThemeButton, CopyMcpButton
+    LeftSortCpu, LeftSortMemory, RightSortCpu, RightSortMemory, LightThemeButton, DarkThemeButton, CopyMcpButton,
+    DisplaysButton, DisplayList, RefreshDisplaysButton
 };
 
 const wchar_t* buttonCaption(unsigned id) {
     switch (id) {
     case LiveButton: return L"实时监控";
     case HistoryButton: return L"历史记录";
+    case DisplaysButton: return L"显示器";
+    case RefreshDisplaysButton: return L"刷新";
     case SettingsButton: return L"设置";
     case CpuDetailButton:
     case GpuDetailButton: return L"详情";
@@ -345,7 +359,7 @@ private:
         case WM_NOTIFY: {
             const auto notification = reinterpret_cast<const NMHDR*>(lParam);
             const int id = GetDlgCtrlID(child);
-            if ((id == CoreList || id == DiskList) && notification->code == NM_CUSTOMDRAW &&
+            if ((id == CoreList || id == DiskList || id == DisplayList) && notification->code == NM_CUSTOMDRAW &&
                 notification->hwndFrom == ListView_GetHeader(child)) {
                 return dashboard.drawDetailHeader(*reinterpret_cast<NMCUSTOMDRAW*>(lParam));
             }
@@ -512,9 +526,10 @@ private:
         valueFont_ = readingFont_ ? font(34, FW_BOLD, ReadingFontFamily) : font(34, FW_SEMIBOLD, L"Consolas");
         compactValueFont_ = readingFont_ ? font(15, FW_BOLD, ReadingFontFamily) : nullptr;
         boldFont_ = font(15, FW_SEMIBOLD);
-        for (const auto child : {liveButton_, historyButton_, settingsButton_, cpuCombo_, gpuCombo_, rangeCombo_,
+        for (const auto child : {liveButton_, historyButton_, displaysButton_, settingsButton_, cpuCombo_, gpuCombo_, rangeCombo_,
             cpuDetailButton_, gpuDetailButton_, diskDetailButton_, detailBackButton_, picker_, queryButton_,
-            retentionEdit_, saveButton_, lightThemeButton_, darkThemeButton_, copyMcpButton_, coreList_, diskList_}) {
+            retentionEdit_, saveButton_, lightThemeButton_, darkThemeButton_, copyMcpButton_, refreshDisplaysButton_,
+            coreList_, diskList_, displayList_}) {
             if (child) SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(normalFont_), TRUE);
         }
         for (const auto child : sortButtons_) {
@@ -529,6 +544,8 @@ private:
         refreshFonts();
         liveButton_ = button(LiveButton);
         historyButton_ = button(HistoryButton);
+        displaysButton_ = button(DisplaysButton);
+        refreshDisplaysButton_ = button(RefreshDisplaysButton);
         settingsButton_ = button(SettingsButton);
         cpuCombo_ = combo(CpuCombo, {L"占用率 %", L"封装温度 °C", L"封装功耗 W"});
         gpuCombo_ = combo(GpuCombo, {L"占用率 %", L"温度 °C", L"板卡功耗 W"});
@@ -564,6 +581,7 @@ private:
         SendMessageW(rankTooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
         coreList_ = detailList(CoreList, CoreColumns);
         diskList_ = detailList(DiskList, DiskColumns);
+        displayList_ = detailList(DisplayList, DisplayColumns);
     }
 
     void applyTheme() {
@@ -582,10 +600,10 @@ private:
         const auto nativeTheme = darkMode_ ? L"DarkMode_Explorer" : nullptr;
         SetWindowTheme(window_, nativeTheme, nullptr);
         SetWindowTheme(rankTooltip_, nativeTheme, nullptr);
-        for (const auto child : {cpuCombo_, gpuCombo_, rangeCombo_, picker_, retentionEdit_, coreList_, diskList_}) {
+        for (const auto child : {cpuCombo_, gpuCombo_, rangeCombo_, picker_, retentionEdit_, coreList_, diskList_, displayList_}) {
             SetWindowTheme(child, nativeTheme, nullptr);
         }
-        for (const auto list : {coreList_, diskList_}) {
+        for (const auto list : {coreList_, diskList_, displayList_}) {
             SetWindowTheme(ListView_GetHeader(list), darkMode_ ? L"DarkMode_ItemsView" : nullptr, nullptr);
             SendMessageW(list, LVM_SETTEXTCOLOR, 0, theme_->ink);
             SendMessageW(list, LVM_SETBKCOLOR, 0, theme_->surface);
@@ -644,7 +662,20 @@ private:
     }
 
     int statusOffset(RECT area) const {
-        return area.right < px(755) ? px(22) : 0;
+        const int inlineWidth = detailPane() == DetailPane::None ? 822 : 755;
+        return area.right < px(inlineWidth) ? px(22) : 0;
+    }
+
+    const DisplayInfo* selectedDisplay() const {
+        if (!displays_) return nullptr;
+        const auto index = static_cast<size_t>(SendMessageW(displayList_, LVM_GETNEXTITEM,
+            static_cast<WPARAM>(-1), LVNI_SELECTED));
+        return index < displays_->size() ? &(*displays_)[index] : nullptr;
+    }
+
+    int displayPageHeight() const {
+        const auto display = selectedDisplay();
+        return display && display->gamut ? DisplayPlotPageHeight : DisplayPageHeight;
     }
 
     const std::vector<std::wstring>& modelList(size_t card) const {
@@ -698,7 +729,8 @@ private:
         const bool settings = tab_ == Tab::Settings;
         const bool overview = live || history;
         const int contentBottom = overview ? rankPanel(area, 1).bottom + pad :
-            px(settings ? McpCardBottom + PageInset : detail == DetailPane::Gpu ? 446 : 390);
+            px(settings ? McpCardBottom + PageInset : tab_ == Tab::Displays ? displayPageHeight() :
+                detail == DetailPane::Gpu ? 446 : 390);
         scrollMax_ = std::max(0, contentBottom - static_cast<int>(area.bottom));
         scroll_ = std::clamp(scroll_, 0, scrollMax_);
         const SCROLLINFO scrollInfo{sizeof(SCROLLINFO), SIF_RANGE | SIF_PAGE | SIF_POS,
@@ -713,9 +745,11 @@ private:
         }
 
         const int nav = pad + px(209);
-        move(liveButton_, nav, px(17), px(82), px(32), !inDetail);
-        move(historyButton_, nav + px(86), px(17), px(82), px(32), !inDetail);
-        move(settingsButton_, nav + px(172), px(17), px(55), px(32), !inDetail);
+        move(liveButton_, nav, px(17), px(78), px(32), !inDetail);
+        move(historyButton_, nav + px(82), px(17), px(78), px(32), !inDetail);
+        move(displaysButton_, nav + px(164), px(17), px(60), px(32), !inDetail);
+        move(settingsButton_, nav + px(228), px(17), px(50), px(32), !inDetail);
+        move(refreshDisplaysButton_, area.right - pad - px(62), px(87), px(62), px(28), tab_ == Tab::Displays);
         move(detailBackButton_, nav, px(17), px(118), px(32), inDetail);
         move(cpuCombo_, cards_[0].left + px(CardInset), cards_[0].top + px(CardTools), px(125), px(125), overview);
         move(gpuCombo_, cards_[3].left + px(CardInset), cards_[3].top + px(CardTools), px(125), px(125), overview);
@@ -746,6 +780,8 @@ private:
             std::max(0, detailBottom - px(274)), detail == DetailPane::Cpu && !details_.cores.empty());
         move(diskList_, pad + px(12), px(157), static_cast<int>(area.right) - 2 * pad - px(24),
             std::max(0, detailBottom - px(247)), detail == DetailPane::Disk && !details_.disks.empty());
+        move(displayList_, pad + px(12), px(DisplayListTop), static_cast<int>(area.right) - 2 * pad - px(24),
+            px(DisplayListHeight), tab_ == Tab::Displays && displays_ && !displays_->empty());
     }
 
     void scrollTo(int position) {
@@ -852,6 +888,8 @@ private:
             SetTimer(window_, RefreshTimer, 1000, nullptr);
             if (tab_ == Tab::Live || detailPane() != DetailPane::None) {
                 refreshLive();
+            } else if (tab_ == Tab::Displays) {
+                refreshDisplays();
             }
         } else {
             KillTimer(window_, RefreshTimer);
@@ -877,6 +915,14 @@ private:
         details_ = std::move(details);
         updateDetailList(coreList_, previousCores, details_.cores.size(), detailPane() == DetailPane::Cpu);
         updateDetailList(diskList_, previousDisks, details_.disks.size(), detailPane() == DetailPane::Disk);
+    }
+
+    void refreshDisplays() {
+        const auto previous = displays_ ? displays_->size() : 0;
+        displays_ = activeDisplays();
+        updateDetailList(displayList_, previous, displays_ ? displays_->size() : 0, true);
+        layout();
+        invalidate();
     }
 
     void syncDetailRequest() {
@@ -974,6 +1020,16 @@ private:
             case 7: return decimal(disk.powerCycles, 0, L" 次");
             case 8: return decimal(disk.errors, 0, L"");
             }
+        } else if (list == displayList_ && displays_ && row < displays_->size()) {
+            const auto& display = (*displays_)[row];
+            switch (column) {
+            case 0: return std::to_wstring(row + 1);
+            case 1: return display.name.empty() ? L"—" : display.name;
+            case 2: return display.signalWidth && display.signalHeight ?
+                std::to_wstring(display.signalWidth) + L" × " + std::to_wstring(display.signalHeight) : L"—";
+            case 3: return display.refreshHz ? decimal(*display.refreshHz, 2, L" Hz") : L"—";
+            case 4: return display.connection.empty() ? L"—" : display.connection;
+            }
         }
         return {};
     }
@@ -1060,7 +1116,7 @@ private:
     void activate(Tab target) {
         tab_ = target;
         scroll_ = 0;
-        for (const auto child : {liveButton_, historyButton_, settingsButton_}) {
+        for (const auto child : {liveButton_, historyButton_, displaysButton_, settingsButton_}) {
             InvalidateRect(child, nullptr, FALSE);
         }
         layout();
@@ -1070,6 +1126,8 @@ private:
                 refreshLive();
                 SetFocus(detailPane() == DetailPane::None ? liveButton_ : detailBackButton_);
             }
+        } else if (target == Tab::Displays) {
+            if (visible_.value_or(false)) refreshDisplays();
         } else if (target == Tab::History && !historyEnd_) {
             setPicker(nowMs());
             queryHistory();
@@ -1162,13 +1220,15 @@ private:
         const auto caption = buttonCaption(id);
         if (!caption) return false;
         auto kind = ButtonKind::Action;
-        if (id == LiveButton || id == HistoryButton || id == SettingsButton || id == DetailBackButton) {
+        if (id == LiveButton || id == HistoryButton || id == DisplaysButton || id == SettingsButton ||
+            id == DetailBackButton) {
             kind = ButtonKind::Tab;
         } else if (id == QueryButton || id == SaveButton) {
             kind = ButtonKind::Primary;
         }
         const bool selected = (id == LiveButton && tab_ == Tab::Live) ||
-            (id == HistoryButton && tab_ == Tab::History) || (id == SettingsButton && tab_ == Tab::Settings) ||
+            (id == HistoryButton && tab_ == Tab::History) || (id == DisplaysButton && tab_ == Tab::Displays) ||
+            (id == SettingsButton && tab_ == Tab::Settings) ||
             (id == LightThemeButton && !darkMode_) || (id == DarkThemeButton && darkMode_);
         return ui::drawButton(item, dpi_, kind, selected, normalFont_, caption, *theme_);
     }
@@ -1203,6 +1263,7 @@ private:
             for (const auto child : {cpuCombo_, gpuCombo_, rangeCombo_}) sizeCombo(child);
             scaleColumns(coreList_, CoreColumns);
             scaleColumns(diskList_, DiskColumns);
+            scaleColumns(displayList_, DisplayColumns);
             const auto& bounds = *reinterpret_cast<const RECT*>(lParam);
             SetWindowPos(window_, nullptr, bounds.left, bounds.top,
                 bounds.right - bounds.left, bounds.bottom - bounds.top, SWP_NOZORDER | SWP_NOACTIVATE);
@@ -1224,6 +1285,13 @@ private:
         case TrayMessage:
             trayEvent(wParam, lParam);
             return 0;
+        case WM_DISPLAYCHANGE:
+        case WM_DEVICECHANGE:
+            if (tab_ == Tab::Displays && visible_.value_or(false) &&
+                (message == WM_DISPLAYCHANGE || wParam == DBT_DEVNODES_CHANGED)) {
+                refreshDisplays();
+            }
+            break;
         case WM_TIMER:
             if (wParam == RefreshTimer && (tab_ == Tab::Live || detailPane() != DetailPane::None)
                 && visible_.value_or(false)) {
@@ -1267,6 +1335,8 @@ private:
             switch (wParam) {
             case LiveButton: activate(Tab::Live); break;
             case HistoryButton: activate(Tab::History); break;
+            case DisplaysButton: activate(Tab::Displays); break;
+            case RefreshDisplaysButton: refreshDisplays(); break;
             case SettingsButton: activate(Tab::Settings); break;
             case QueryButton: queryHistory(); break;
             case SaveButton: saveSettings(); break;
@@ -1322,7 +1392,8 @@ private:
                 reinterpret_cast<NMTTDISPINFOW*>(lParam)->lpszText = tooltipText_.data();
                 return 0;
             }
-            if (notification->hwndFrom != coreList_ && notification->hwndFrom != diskList_) {
+            if (notification->hwndFrom != coreList_ && notification->hwndFrom != diskList_ &&
+                notification->hwndFrom != displayList_) {
                 break;
             }
             if (notification->code == LVN_GETDISPINFOW) {
@@ -1331,8 +1402,9 @@ private:
                     const auto text = detailListValue(notification->hwndFrom, item.iItem, item.iSubItem);
                     lstrcpynW(item.pszText, text.c_str(), item.cchTextMax);
                 }
-            } else if (notification->hwndFrom == diskList_ &&
+            } else if ((notification->hwndFrom == diskList_ || notification->hwndFrom == displayList_) &&
                 (notification->code == LVN_ITEMCHANGED || notification->code == LVN_ODSTATECHANGED)) {
+                if (notification->hwndFrom == displayList_ && tab_ == Tab::Displays) layout();
                 invalidate();
             }
             return 0;
@@ -1824,6 +1896,108 @@ private:
         paragraph(dc, smallFont_, note, {left + px(12), noteTop + px(26), right - px(12), area.bottom - px(13)}, theme_->secondary);
     }
 
+    void paintGamutPlot(HDC dc, int left, int top, const DisplayGamut& gamut) const {
+        const int axis = px(238);
+        const int plotLeft = left + px(32);
+        const int plotBottom = top + px(252);
+        const auto toPoint = [&](Chromaticity xy) -> POINT {
+            return {plotLeft + std::lround(xy.x * axis), plotBottom - std::lround(xy.y * axis)};
+        };
+        for (int tick = 0; tick <= 5; ++tick) {
+            const double value = tick / 5.0;
+            const auto point = toPoint({value, value});
+            line(dc, point.x, plotBottom - axis, point.x, plotBottom, theme_->grid);
+            line(dc, plotLeft, point.y, plotLeft + axis, point.y, theme_->grid);
+            const auto text = decimal(value, 1, L"");
+            label(dc, smallFont_, text, {point.x - px(13), plotBottom + px(3), point.x + px(13),
+                plotBottom + px(23)}, theme_->secondary, DT_CENTER);
+            if (tick > 0) {
+                label(dc, smallFont_, text, {left, point.y - px(10), plotLeft - px(6), point.y + px(10)},
+                    theme_->secondary, DT_RIGHT);
+            }
+        }
+        line(dc, plotLeft, plotBottom, plotLeft + axis, plotBottom, theme_->secondary);
+        line(dc, plotLeft, plotBottom - axis, plotLeft, plotBottom, theme_->secondary);
+        label(dc, smallFont_, L"x", {plotLeft + axis + px(16), plotBottom, plotLeft + axis + px(32),
+            plotBottom + px(24)}, theme_->secondary);
+        label(dc, smallFont_, L"y", {plotLeft - px(4), top - px(4), plotLeft + px(14), top + px(14)}, theme_->secondary);
+
+        const int legend = plotLeft + axis + px(24);
+        const auto drawTriangle = [&](const auto& primaries, int style, int width, COLORREF color, int legendY) {
+            const auto pen = CreatePen(style, width, color);
+            if (!pen) return;
+            const auto previous = SelectObject(dc, pen);
+            const auto previousMode = SetBkMode(dc, TRANSPARENT);
+            const std::array points{toPoint(primaries[0]), toPoint(primaries[1]),
+                toPoint(primaries[2]), toPoint(primaries[0])};
+            Polyline(dc, points.data(), static_cast<int>(points.size()));
+            MoveToEx(dc, legend, legendY, nullptr);
+            LineTo(dc, legend + px(23), legendY);
+            SetBkMode(dc, previousMode);
+            SelectObject(dc, previous);
+            DeleteObject(pen);
+        };
+        drawTriangle(gamut.primaries, PS_SOLID, px(2), theme_->blue, top + px(32));
+        drawTriangle(SrgbPrimaries, PS_DASH, 1, theme_->secondary, top + px(56));
+        label(dc, smallFont_, L"显示器", {legend + px(30), top + px(22), legend + px(90), top + px(42)});
+        label(dc, smallFont_, L"sRGB", {legend + px(30), top + px(46), legend + px(90), top + px(66)});
+        constexpr const wchar_t* names[]{L"R", L"G", L"B"};
+        for (size_t i = 0; i < gamut.primaries.size(); ++i) {
+            const auto point = toPoint(gamut.primaries[i]);
+            rounded(dc, {point.x - px(3), point.y - px(3), point.x + px(4), point.y + px(4)},
+                px(7), theme_->blue, theme_->surface);
+            label(dc, smallFont_, names[i], {point.x + px(6), point.y - px(17), point.x + px(24), point.y + px(3)});
+        }
+    }
+
+    void paintDisplays(HDC dc, RECT area) const {
+        const int pad = px(PageInset);
+        const int right = area.right - pad;
+        const int bottom = px(displayPageHeight());
+        label(dc, titleFont_, L"当前启用的显示器", {pad, px(83), right, px(120)});
+        if (!displays_ || displays_->empty()) {
+            const auto text = displays_ ? L"当前没有启用的显示器。" : L"无法读取当前显示配置。";
+            rounded(dc, {pad, px(124), right, bottom - pad}, px(22), theme_->surface, theme_->border);
+            label(dc, normalFont_, text, {pad + px(12), px(132), right - px(12), px(162)}, theme_->muted);
+            return;
+        }
+
+        const int top = px(DisplayGamutTop);
+        rounded(dc, {pad, px(124), right, top - px(6)}, px(22), theme_->surface, theme_->border);
+        rounded(dc, {pad, top, right, bottom - pad}, px(22), theme_->surface, theme_->border);
+        const int textLeft = pad + px(14);
+        const int textRight = right - px(14);
+        const auto display = selectedDisplay();
+        if (!display) {
+            label(dc, boldFont_, L"色域", {textLeft, top + px(9), textRight, top + px(31)});
+            label(dc, normalFont_, L"选择一台显示器查看色域。", {textLeft, top + px(37), textRight, top + px(65)},
+                theme_->secondary);
+            return;
+        }
+
+        const auto name = display->name.empty() ? L"所选显示器" : display->name;
+        label(dc, boldFont_, name + L" · 色域", {textLeft, top + px(9), textRight, top + px(31)});
+        if (!display->gamut) {
+            label(dc, normalFont_, L"暂无可用的 EDID 色域数据。", {textLeft, top + px(37), textRight, top + px(65)},
+                theme_->secondary);
+            return;
+        }
+        const auto& gamut = *display->gamut;
+        const auto percentages = L"sRGB " + decimal(gamut.srgb, 1, L"%") +
+            L"     Display P3 " + decimal(gamut.displayP3, 1, L"%") +
+            L"     Adobe RGB " + decimal(gamut.adobeRgb, 1, L"%");
+        label(dc, normalFont_, percentages, {textLeft, top + px(32), textRight, top + px(56)});
+        const auto xy = [](Chromaticity point) {
+            return L"(" + decimal(point.x, 3, L"") + L", " + decimal(point.y, 3, L"") + L")";
+        };
+        const auto coordinates = L"R " + xy(gamut.primaries[0]) + L"     G " + xy(gamut.primaries[1]) +
+            L"     B " + xy(gamut.primaries[2]);
+        label(dc, smallFont_, coordinates, {textLeft, top + px(55), textRight, top + px(76)}, theme_->secondary);
+        label(dc, smallFont_, L"基于 EDID 的 CIE 1931 xy 覆盖率估算",
+            {textLeft, top + px(76), textRight, top + px(98)}, theme_->secondary);
+        paintGamutPlot(dc, textLeft, top + px(98), gamut);
+    }
+
     void render(HDC dc, RECT area) const {
         for (auto& tip : rankTips_) tip = {};
         modelTips_.clear();
@@ -1834,6 +2008,10 @@ private:
         label(dc, titleFont_, L"Computer Watch", {pad + px(34), px(14), pad + px(204), px(50)});
         if (tab_ == Tab::Settings) {
             paintSettings(dc, area);
+            return;
+        }
+        if (tab_ == Tab::Displays) {
+            paintDisplays(dc, area);
             return;
         }
 
@@ -1929,6 +2107,7 @@ private:
     HICON appIcon_{}, trayIcon_{};
     UiCallbacks callbacks_;
     HWND window_{}, liveButton_{}, historyButton_{}, settingsButton_{}, cpuCombo_{}, gpuCombo_{};
+    HWND displaysButton_{}, displayList_{}, refreshDisplaysButton_{};
     HWND picker_{}, rangeCombo_{}, queryButton_{}, retentionEdit_{}, saveButton_{};
     HWND lightThemeButton_{}, darkThemeButton_{};
     HWND copyMcpButton_{};
@@ -1939,6 +2118,7 @@ private:
     struct ModelTip { RECT bounds; const std::wstring* text; };
     mutable std::vector<ModelTip> modelTips_;
     std::optional<HardwareInventory> inventory_;
+    std::optional<std::vector<DisplayInfo>> displays_;
     POINT cursor_{-1, -1};
     std::wstring tooltipText_;
     std::array<HWND, 4> sortButtons_{};
