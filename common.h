@@ -30,6 +30,17 @@ struct CoreDetail {
     double frequencyMhz = Missing;
 };
 
+enum class SmartLogFormat { None, Ata, Nvme };
+
+struct DiskSmartLog {
+    SmartLogFormat format{};
+    std::array<std::uint8_t, 512> bytes{};
+    std::array<std::uint8_t, 512> thresholds{};
+    bool hasThresholds{};
+};
+
+using DiskSmartRow = std::array<std::wstring, 3>;
+
 struct DiskDetail {
     unsigned number{};
     std::wstring name;
@@ -41,6 +52,8 @@ struct DiskDetail {
     double powerCycles = Missing;
     double errors = Missing;
     std::wstring note;
+    DiskSmartLog smartLog;
+    std::vector<DiskSmartRow> smartRows;
 };
 
 struct MemoryDevice {

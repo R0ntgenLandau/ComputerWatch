@@ -85,6 +85,13 @@ constexpr std::pair<const wchar_t*, int> MemoryTimingColumns[] = {
     {L"字段", 150}, {L"读数", 70}, {L"单位", 65}, {L"状态", 110}, {L"作用范围", 210},
     {L"采集时间", 155}, {L"来源", 270}, {L"原因 / 验证情况", 370}
 };
+constexpr std::pair<const wchar_t*, int> DiskSmartColumns[] = {
+    {L"项目", 190}, {L"读数", 310}, {L"原始值 / 说明", 270}
+};
+constexpr int DiskSummaryTop = 157;
+constexpr int DiskSummaryHeight = 112;
+constexpr int DiskSmartTop = 347;
+constexpr int DiskPageHeight = 535;
 
 const wchar_t* readingStatus(ReadingStatus status) {
     switch (status) {
@@ -111,7 +118,7 @@ enum ControlId {
     CpuDetailButton, GpuDetailButton, DiskDetailButton, DetailBackButton, CoreList, DiskList,
     LeftSortCpu, LeftSortMemory, RightSortCpu, RightSortMemory, LightThemeButton, DarkThemeButton, CopyMcpButton,
     DisplaysButton, DisplayList, RefreshDisplaysButton, MemoryDetailButton,
-    MemoryPlotButton, MemoryTimingButton, ImportMemoryTimingButton, MemoryTimingList
+    MemoryPlotButton, MemoryTimingButton, ImportMemoryTimingButton, MemoryTimingList, DiskSmartList
 };
 
 const wchar_t* buttonCaption(unsigned id) {
@@ -412,7 +419,8 @@ private:
         case WM_NOTIFY: {
             const auto notification = reinterpret_cast<const NMHDR*>(lParam);
             const int id = GetDlgCtrlID(child);
-            if ((id == CoreList || id == DiskList || id == DisplayList || id == MemoryTimingList) && notification->code == NM_CUSTOMDRAW &&
+            if ((id == CoreList || id == DiskList || id == DiskSmartList || id == DisplayList ||
+                 id == MemoryTimingList) && notification->code == NM_CUSTOMDRAW &&
                 notification->hwndFrom == ListView_GetHeader(child)) {
                 return dashboard.drawDetailHeader(*reinterpret_cast<NMCUSTOMDRAW*>(lParam));
             }
@@ -585,7 +593,7 @@ private:
             cpuDetailButton_, memoryDetailButton_, gpuDetailButton_, diskDetailButton_, detailBackButton_, picker_, queryButton_,
             memoryPlotButton_, memoryTimingButton_, importMemoryTimingButton_,
             retentionEdit_, saveButton_, lightThemeButton_, darkThemeButton_, copyMcpButton_, refreshDisplaysButton_,
-            coreList_, diskList_, displayList_, memoryTimingList_}) {
+            coreList_, diskList_, diskSmartList_, displayList_, memoryTimingList_}) {
             if (child) SendMessageW(child, WM_SETFONT, reinterpret_cast<WPARAM>(normalFont_), TRUE);
         }
         for (const auto child : sortButtons_) {
@@ -641,6 +649,7 @@ private:
         SendMessageW(rankTooltip_, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&tool));
         coreList_ = detailList(CoreList, CoreColumns);
         diskList_ = detailList(DiskList, DiskColumns);
+        diskSmartList_ = detailList(DiskSmartList, DiskSmartColumns);
         displayList_ = detailList(DisplayList, DisplayColumns);
         memoryTimingList_ = detailList(MemoryTimingList, MemoryTimingColumns);
     }
@@ -661,10 +670,11 @@ private:
         const auto nativeTheme = darkMode_ ? L"DarkMode_Explorer" : nullptr;
         SetWindowTheme(window_, nativeTheme, nullptr);
         SetWindowTheme(rankTooltip_, nativeTheme, nullptr);
-        for (const auto child : {cpuCombo_, gpuCombo_, rangeCombo_, picker_, retentionEdit_, coreList_, diskList_, displayList_, memoryTimingList_}) {
+        for (const auto child : {cpuCombo_, gpuCombo_, rangeCombo_, picker_, retentionEdit_, coreList_,
+             diskList_, diskSmartList_, displayList_, memoryTimingList_}) {
             SetWindowTheme(child, nativeTheme, nullptr);
         }
-        for (const auto list : {coreList_, diskList_, displayList_, memoryTimingList_}) {
+        for (const auto list : {coreList_, diskList_, diskSmartList_, displayList_, memoryTimingList_}) {
             SetWindowTheme(ListView_GetHeader(list), darkMode_ ? L"DarkMode_ItemsView" : nullptr, nullptr);
             SendMessageW(list, LVM_SETTEXTCOLOR, 0, theme_->ink);
             SendMessageW(list, LVM_SETBKCOLOR, 0, theme_->surface);
@@ -807,7 +817,8 @@ private:
         const bool overview = live || history;
         const int contentBottom = overview ? rankPanel(area, 1).bottom + pad :
             px(settings ? McpCardBottom + PageInset : tab_ == Tab::Displays ? displayPageHeight() :
-                detail == DetailPane::Memory ? memoryPageHeight() : detail == DetailPane::Gpu ? 446 : 390);
+                detail == DetailPane::Memory ? memoryPageHeight() : detail == DetailPane::Disk ? DiskPageHeight :
+                detail == DetailPane::Gpu ? 446 : 390);
         scrollMax_ = std::max(0, contentBottom - static_cast<int>(area.bottom));
         scroll_ = std::clamp(scroll_, 0, scrollMax_);
         const SCROLLINFO scrollInfo{sizeof(SCROLLINFO), SIF_RANGE | SIF_PAGE | SIF_POS,
@@ -872,8 +883,11 @@ private:
         const int detailBottom = std::max(static_cast<int>(area.bottom), contentBottom);
         move(coreList_, pad + px(12), px(253), static_cast<int>(area.right) - 2 * pad - px(24),
             std::max(0, detailBottom - px(274)), detail == DetailPane::Cpu && !details_.cores.empty());
-        move(diskList_, pad + px(12), px(157), static_cast<int>(area.right) - 2 * pad - px(24),
-            std::max(0, detailBottom - px(247)), detail == DetailPane::Disk && !details_.disks.empty());
+        const int diskWidth = static_cast<int>(area.right) - 2 * pad - px(24);
+        move(diskList_, pad + px(12), px(DiskSummaryTop), diskWidth,
+            px(DiskSummaryHeight), detail == DetailPane::Disk && !details_.disks.empty());
+        move(diskSmartList_, pad + px(12), px(DiskSmartTop), diskWidth, detailBottom - px(DiskSmartTop + 22),
+            detail == DetailPane::Disk && diskSmartRowCount_ > 0);
         move(displayList_, pad + px(12), px(DisplayListTop), static_cast<int>(area.right) - 2 * pad - px(24),
             px(DisplayListHeight), tab_ == Tab::Displays && displays_ && !displays_->empty());
     }
@@ -1007,15 +1021,43 @@ private:
     void replaceDetails(HardwareDetails details) {
         const size_t previousCores = details_.cores.size();
         const size_t previousDisks = details_.disks.size();
+        const auto* selectedDisk = selectedSmartDisk();
+        const auto diskNumber = selectedDisk ? std::optional<unsigned>(selectedDisk->number) : std::nullopt;
         const size_t previousTimings = details_.memoryTimings ? details_.memoryTimings->fields.size() : 0;
         details_ = std::move(details);
         updateDetailList(coreList_, previousCores, details_.cores.size(), detailPane() == DetailPane::Cpu);
         updateDetailList(diskList_, previousDisks, details_.disks.size(), detailPane() == DetailPane::Disk);
+        if (detailPane() == DetailPane::Disk && !details_.disks.empty()) {
+            const auto disk = std::find_if(details_.disks.begin(), details_.disks.end(),
+                [&](const DiskDetail& entry) { return entry.number == diskNumber; });
+            const int index = disk == details_.disks.end() ? 0 : static_cast<int>(disk - details_.disks.begin());
+            if (selectedDiskIndex() != index) {
+                ListView_SetItemState(diskList_, index, LVIS_SELECTED, LVIS_SELECTED);
+            }
+        }
+        refreshSmartRows();
         updateDetailList(memoryTimingList_, previousTimings,
             details_.memoryTimings ? details_.memoryTimings->fields.size() : 0,
             detailPane() == DetailPane::Memory && memoryTimingExpanded_);
         if (detailPane() == DetailPane::Memory && previousTimings !=
             (details_.memoryTimings ? details_.memoryTimings->fields.size() : 0)) layout();
+    }
+
+    int selectedDiskIndex() const {
+        return ListView_GetNextItem(diskList_, -1, LVNI_SELECTED);
+    }
+
+    const DiskDetail* selectedSmartDisk() const {
+        if (details_.disks.empty()) return nullptr;
+        const auto index = static_cast<size_t>(selectedDiskIndex());
+        return &details_.disks[index < details_.disks.size() ? index : 0];
+    }
+
+    void refreshSmartRows() {
+        const auto* disk = selectedSmartDisk();
+        const auto count = disk ? disk->smartRows.size() : 0;
+        updateDetailList(diskSmartList_, diskSmartRowCount_, count, detailPane() == DetailPane::Disk);
+        diskSmartRowCount_ = count;
     }
 
     void refreshDisplays() {
@@ -1100,6 +1142,12 @@ private:
     }
 
     std::wstring detailListValue(HWND list, size_t row, int column) const {
+        if (list == diskSmartList_) {
+            const auto* disk = selectedSmartDisk();
+            if (disk && row < disk->smartRows.size() && column >= 0 && column < 3)
+                return disk->smartRows[row][column];
+            return {};
+        }
         if (list == memoryTimingList_ && details_.memoryTimings && row < details_.memoryTimings->fields.size()) {
             const auto& field = details_.memoryTimings->fields[row];
             switch (column) {
@@ -1420,6 +1468,7 @@ private:
             for (const auto child : {cpuCombo_, gpuCombo_, rangeCombo_}) sizeCombo(child);
             scaleColumns(coreList_, CoreColumns);
             scaleColumns(diskList_, DiskColumns);
+            scaleColumns(diskSmartList_, DiskSmartColumns);
             scaleColumns(displayList_, DisplayColumns);
             scaleColumns(memoryTimingList_, MemoryTimingColumns);
             const auto& bounds = *reinterpret_cast<const RECT*>(lParam);
@@ -1561,7 +1610,8 @@ private:
                 return 0;
             }
             if (notification->hwndFrom != coreList_ && notification->hwndFrom != diskList_ &&
-                notification->hwndFrom != displayList_ && notification->hwndFrom != memoryTimingList_) {
+                notification->hwndFrom != diskSmartList_ && notification->hwndFrom != displayList_ &&
+                notification->hwndFrom != memoryTimingList_) {
                 break;
             }
             if (notification->code == LVN_GETDISPINFOW) {
@@ -1573,6 +1623,7 @@ private:
             } else if ((notification->hwndFrom == diskList_ || notification->hwndFrom == displayList_) &&
                 (notification->code == LVN_ITEMCHANGED || notification->code == LVN_ODSTATECHANGED)) {
                 if (notification->hwndFrom == displayList_ && tab_ == Tab::Displays) layout();
+                if (notification->hwndFrom == diskList_) refreshSmartRows();
                 invalidate();
             }
             return 0;
@@ -2155,6 +2206,7 @@ private:
     }
 
     void paintDiskDetails(HDC dc, RECT area) const {
+        area.bottom = std::max(area.bottom, static_cast<LONG>(px(DiskPageHeight)));
         const int left = px(24);
         const int right = area.right - left;
         label(dc, titleFont_, L"磁盘 SMART", {left, px(83), right, px(120)});
@@ -2170,14 +2222,18 @@ private:
             }
             return;
         }
-        const int selected = static_cast<int>(SendMessageW(diskList_, LVM_GETNEXTITEM, static_cast<WPARAM>(-1), LVNI_SELECTED));
-        const size_t index = selected >= 0 && static_cast<size_t>(selected) < details_.disks.size() ? selected : 0;
-        const auto& disk = details_.disks[index];
-        const int noteTop = area.bottom - px(80);
-        label(dc, boldFont_, L"磁盘 " + std::to_wstring(disk.number) + L" 读数说明",
+        const auto& disk = *selectedSmartDisk();
+        const int noteTop = px(DiskSummaryTop + DiskSummaryHeight + 10);
+        label(dc, boldFont_, L"磁盘 " + std::to_wstring(disk.number) + L" · " + disk.name,
             {left + px(12), noteTop, right - px(12), noteTop + px(24)});
-        const std::wstring_view note = disk.note.empty() ? L"选择表格中的磁盘，可查看相应的读数说明。" : std::wstring_view(disk.note);
-        paragraph(dc, smallFont_, note, {left + px(12), noteTop + px(26), right - px(12), area.bottom - px(13)}, theme_->secondary);
+        const auto note = disk.smartLog.format == SmartLogFormat::Ata
+            ? (disk.smartLog.hasThresholds ? L"读数依次为当前值 / 最差值 / 阈值。原始值按十六进制显示。"
+                                          : L"读数依次为当前值 / 最差值 / 阈值。设备或驱动未返回阈值。")
+            : disk.smartLog.format == SmartLogFormat::Nvme
+                ? L"NVMe 健康日志。主机累计读写按每数据单位 512,000 字节估算。"
+                : L"暂无详细 SMART 读数。";
+        label(dc, smallFont_, note, {left + px(12), noteTop + px(24), right - px(12), noteTop + px(46)}, theme_->secondary);
+        label(dc, smallFont_, disk.note, {left + px(12), noteTop + px(44), right - px(12), noteTop + px(66)}, theme_->muted);
     }
 
     void paintGamutPlot(HDC dc, int left, int top, const DisplayGamut& gamut) const {
@@ -2402,7 +2458,8 @@ private:
     bool memoryPlotExpanded_{}, memoryTimingExpanded_ = true;
     std::optional<std::array<unsigned, 4>> memoryTiming_;
     std::wstring memoryTimingSource_ = L"导入本机 HWiNFO HTML 报告以查看时序。";
-    HWND coreList_{}, diskList_{}, rankTooltip_{};
+    HWND coreList_{}, diskList_{}, diskSmartList_{}, rankTooltip_{};
+    size_t diskSmartRowCount_{};
     struct RankTip { RECT bounds{}; std::wstring text; };
     mutable std::array<RankTip, 2 * TopCount> rankTips_{};
     struct ModelTip { RECT bounds; const std::wstring* text; };

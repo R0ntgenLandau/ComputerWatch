@@ -73,7 +73,7 @@ private:
 };
 
 std::wstring channelName(DWORD pid, const wchar_t* part) {
-    return L"Local\\ComputerWatch.Sensors.3." + std::to_wstring(pid) + L"." + part;
+    return L"Local\\ComputerWatch.Sensors.4." + std::to_wstring(pid) + L"." + part;
 }
 
 std::wstring executablePath() {
@@ -133,6 +133,7 @@ struct SharedDisk {
     double powerOnHours = Missing;
     double powerCycles = Missing;
     double errors = Missing;
+    DiskSmartLog smartLog;
 };
 
 struct SensorPage {
@@ -164,6 +165,7 @@ void publishDisks(SensorPage& page, const std::vector<DiskDetail>& disks) {
         row.powerOnHours = disk.powerOnHours;
         row.powerCycles = disk.powerCycles;
         row.errors = disk.errors;
+        row.smartLog = disk.smartLog;
     }
 }
 
@@ -217,6 +219,8 @@ public:
                 disk.powerOnHours = row.powerOnHours;
                 disk.powerCycles = row.powerCycles;
                 disk.errors = row.errors;
+                disk.smartLog = row.smartLog;
+                disk.smartRows = diskSmartRows(disk);
                 disks.push_back(std::move(disk));
             }
             return disks;

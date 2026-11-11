@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <cwchar>
 #include <string_view>
 
 namespace cw {
@@ -123,6 +124,15 @@ double readLittleEndian(const BYTE* value, std::size_t length) {
     return result;
 }
 
+bool validAtaPage(const std::array<BYTE, 512>& page) {
+    unsigned checksum = 0;
+    for (const BYTE value : page) checksum += value;
+    return (page[0] || page[1]) && (checksum & 0xff) == 0;
+}
+
+constexpr std::size_t AtaAttributeSize = 12;
+constexpr std::size_t AtaAttributeEnd = 2 + 30 * AtaAttributeSize;
+
 bool readNvmeHealth(HANDLE drive, STORAGE_PROPERTY_ID property, DiskDetail& disk) {
     constexpr auto queryOffset = offsetof(STORAGE_PROPERTY_QUERY, AdditionalParameters);
     constexpr auto descriptorOffset = offsetof(STORAGE_PROTOCOL_DATA_DESCRIPTOR, ProtocolSpecificData);
@@ -156,6 +166,9 @@ bool readNvmeHealth(HANDLE drive, STORAGE_PROPERTY_ID property, DiskDetail& disk
 
     NVME_HEALTH_INFO_LOG health{};
     std::memcpy(&health, buffer.data() + descriptorOffset + data.ProtocolDataOffset, sizeof(health));
+    static_assert(sizeof(health) == 512);
+    disk.smartLog.format = SmartLogFormat::Nvme;
+    std::memcpy(disk.smartLog.bytes.data(), &health, sizeof(health));
     disk.healthy = health.CriticalWarning.AsUchar == 0;
     const unsigned kelvin = health.Temperature[0] | (static_cast<unsigned>(health.Temperature[1]) << 8);
     if (kelvin != 0 && kelvin != 0xffff)
@@ -214,18 +227,21 @@ void readAtaHealth(HANDLE drive, DiskDetail& disk, std::stop_token stop) {
         return;
     }
 
-    unsigned checksum = 0;
-    for (const BYTE value : attributes)
-        checksum += value;
-    if ((attributes[0] == 0 && attributes[1] == 0) || (checksum & 0xff) != 0) {
+    if (!validAtaPage(attributes)) {
         disk.note = L"SATA SMART 数据校验失败";
         return;
     }
 
     std::array<const BYTE*, 256> fields{};
-    constexpr std::size_t attributeSize = 12;
-    for (std::size_t offset = 2; offset < 2 + 30 * attributeSize; offset += attributeSize)
+    for (std::size_t offset = 2; offset < AtaAttributeEnd; offset += AtaAttributeSize)
         fields[attributes[offset]] = attributes.data() + offset;
+    disk.smartLog.format = SmartLogFormat::Ata;
+    disk.smartLog.bytes = attributes;
+    if (!stop.stop_requested()) {
+        auto& thresholds = disk.smartLog.thresholds;
+        disk.smartLog.hasThresholds =
+            readAtaSmart(drive, SMART_RCV_DRIVE_DATA, READ_THRESHOLDS, thresholds) && validAtaPage(thresholds);
+    }
 
     // SMART attributes are vendor-specific. SC001's Maxio profile uses 190 for
     // temperature and 231 for remaining life. Only interpret wear on that profile.
@@ -279,7 +295,7 @@ DiskDetail readDrive(unsigned number, std::stop_token stop) {
     } else if (*bus == BusTypeAta || *bus == BusTypeSata) {
         disk.bus = *bus == BusTypeSata ? L"SATA" : L"ATA";
         // Windows requires both access flags for its legacy SMART IOCTLs.
-        // The only ATA commands sent here read status or attributes.
+        // The only ATA commands sent here read status, attributes, or thresholds.
         const DriveHandle smart(path, GENERIC_READ | GENERIC_WRITE);
         if (smart && !stop.stop_requested())
             readAtaHealth(smart.get(), disk, stop);
@@ -293,6 +309,127 @@ DiskDetail readDrive(unsigned number, std::stop_token stop) {
 }
 
 } // namespace
+
+std::vector<DiskSmartRow> diskSmartRows(const DiskDetail& disk) {
+    std::vector<DiskSmartRow> rows;
+    const auto& log = disk.smartLog;
+    const auto hex = [](const BYTE* bytes, size_t length) {
+        constexpr wchar_t digits[] = L"0123456789ABCDEF";
+        std::wstring text = L"0x";
+        while (length) {
+            const auto byte = bytes[--length];
+            text += digits[byte >> 4];
+            text += digits[byte & 15];
+        }
+        return text;
+    };
+    if (log.format == SmartLogFormat::Ata) {
+        std::array<const BYTE*, 256> thresholds{};
+        if (log.hasThresholds) {
+            for (size_t offset = 2; offset < AtaAttributeEnd; offset += AtaAttributeSize)
+                thresholds[log.thresholds[offset]] = log.thresholds.data() + offset;
+        }
+        const bool sc001 = disk.name.find(L"ZHITAI SC001") != std::wstring::npos;
+        constexpr std::pair<BYTE, const wchar_t*> sc001Names[] = {
+            {5, L"新增坏块"}, {9, L"通电时长"}, {12, L"通电次数"}, {168, L"SATA PHY 错误"},
+            {171, L"编程失败"}, {172, L"擦除失败"}, {180, L"剩余备用块"}, {187, L"已报告的不可纠正错误"},
+            {190, L"温度"}, {192, L"意外掉电"}, {196, L"重映射事件"}, {208, L"平均擦除次数"},
+            {231, L"剩余寿命"}, {233, L"NAND 写入计数"}, {234, L"NAND 读取计数"},
+            {241, L"主机写入计数"}, {242, L"主机读取计数"}, {243, L"NAND 温度"}
+        };
+        for (size_t offset = 2; offset < AtaAttributeEnd; offset += AtaAttributeSize) {
+            const BYTE* field = log.bytes.data() + offset;
+            const BYTE id = field[0];
+            if (!id) continue;
+            auto name = hex(field, 1);
+            if (sc001) {
+                for (const auto& [number, label] : sc001Names) {
+                    if (number == id) { name += L"  "; name += label; break; }
+                }
+            }
+            const auto* threshold = thresholds[id];
+            rows.push_back({std::move(name),
+                std::to_wstring(field[3]) + L" / " + std::to_wstring(field[4]) + L" / " +
+                    (threshold ? std::to_wstring(threshold[1]) : L"—"), hex(field + 5, 6)});
+        }
+    } else if (log.format == SmartLogFormat::Nvme) {
+        NVME_HEALTH_INFO_LOG health{};
+        std::memcpy(&health, log.bytes.data(), sizeof(health));
+        const auto add = [&](const wchar_t* name, std::wstring value, std::wstring note = {}) {
+            rows.push_back({name, std::move(value), std::move(note)});
+        };
+        const auto counter = [&](const wchar_t* name, const BYTE (&bytes)[16], const wchar_t* unit) {
+            // Keep all digits of the device's 128-bit counter on every compiler target.
+            std::wstring decimal(1, L'0');
+            for (size_t i = sizeof(bytes); i > 0; --i) {
+                unsigned carry = bytes[i - 1];
+                for (auto digit = decimal.rbegin(); digit != decimal.rend(); ++digit) {
+                    carry += static_cast<unsigned>(*digit - L'0') * 256;
+                    *digit = static_cast<wchar_t>(L'0' + carry % 10);
+                    carry /= 10;
+                }
+                if (carry) decimal.insert(0, std::to_wstring(carry));
+            }
+            add(name, decimal + unit);
+        };
+        const auto kelvinText = [](unsigned value) -> std::wstring {
+            return value && value != 0xffff ? std::to_wstring(static_cast<int>(value) - 273) + L" °C" : L"—";
+        };
+        const auto dataUnits = [&](const wchar_t* name, const BYTE (&bytes)[16]) {
+            const double units = readLittleEndian(bytes, sizeof(bytes));
+            if (!units) { add(name, L"—", L"控制器未报告"); return; }
+            wchar_t size[64]{};
+            const double gb = units * 0.000512;
+            std::swprintf(size, std::size(size), L"%.3g %ls", gb >= 1000 ? gb / 1000 : gb,
+                gb >= 1000 ? L"TB" : L"GB");
+            add(name, size, hex(bytes, sizeof(bytes)));
+        };
+        const auto warning = health.CriticalWarning.AsUchar;
+        std::wstring flags;
+        constexpr const wchar_t* warnings[]{L"备用容量不足", L"温度越限", L"可靠性下降", L"只读",
+            L"易失性备份故障", L"持久内存区域异常"};
+        for (size_t bit = 0; bit < std::size(warnings); ++bit) {
+            if (!(warning & (1u << bit))) continue;
+            if (!flags.empty()) flags += L"、";
+            flags += warnings[bit];
+        }
+        if (warning & 0xc0) {
+            if (!flags.empty()) flags += L"、";
+            flags += L"未知警告位";
+        }
+        add(L"关键警告", warning ? flags : L"无", hex(&warning, 1));
+        add(L"综合温度", kelvinText(health.Temperature[0] | (static_cast<unsigned>(health.Temperature[1]) << 8)));
+        add(L"剩余备用容量", std::to_wstring(health.AvailableSpare) + L"%");
+        add(L"备用容量阈值", std::to_wstring(health.AvailableSpareThreshold) + L"%");
+        add(L"寿命消耗", std::to_wstring(health.PercentageUsed) + L"%");
+        dataUnits(L"主机累计读取", health.DataUnitRead);
+        dataUnits(L"主机累计写入", health.DataUnitWritten);
+        counter(L"主机读取命令", health.HostReadCommands, L" 次");
+        counter(L"主机写入命令", health.HostWrittenCommands, L" 次");
+        counter(L"控制器忙碌时长", health.ControllerBusyTime, L" 分钟");
+        counter(L"通电次数", health.PowerCycle, L" 次");
+        counter(L"通电时长", health.PowerOnHours, L" 小时");
+        counter(L"非正常关机", health.UnsafeShutdowns, L" 次");
+        counter(L"介质及数据完整性错误", health.MediaErrors, L" 次");
+        counter(L"错误日志累计条目", health.ErrorInfoLogEntryCount, L" 条");
+        add(L"警告温度时长", std::to_wstring(health.WarningCompositeTemperatureTime) + L" 分钟");
+        add(L"临界温度时长", std::to_wstring(health.CriticalCompositeTemperatureTime) + L" 分钟");
+        const unsigned temperatures[]{health.TemperatureSensor1, health.TemperatureSensor2,
+            health.TemperatureSensor3, health.TemperatureSensor4, health.TemperatureSensor5,
+            health.TemperatureSensor6, health.TemperatureSensor7, health.TemperatureSensor8};
+        for (size_t i = 0; i < std::size(temperatures); ++i) {
+            rows.push_back({L"温度传感器 " + std::to_wstring(i + 1), kelvinText(temperatures[i]), {}});
+        }
+        // NVMe 1.4+ defines these fields inside the older Windows SDK's Reserved1.
+        constexpr const wchar_t* thermal[]{L"热管理一级触发", L"热管理二级触发", L"热管理一级时长", L"热管理二级时长"};
+        for (size_t i = 0; i < std::size(thermal); ++i) {
+            const auto value = static_cast<unsigned long>(readLittleEndian(log.bytes.data() + 216 + i * 4, 4));
+            add(thermal[i], value ? std::to_wstring(value) + (i < 2 ? L" 次" : L" 秒") : L"—",
+                value ? L"" : L"未触发或未实现");
+        }
+    }
+    return rows;
+}
 
 std::vector<std::wstring> readDiskModels() {
     std::vector<std::wstring> models;
