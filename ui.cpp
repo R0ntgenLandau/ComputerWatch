@@ -854,11 +854,27 @@ private:
         };
 
         const int nav = pad + px(209);
-        move(liveButton_, nav, px(17), px(66), px(32), !inDetail);
-        move(historyButton_, nav + px(69), px(17), px(66), px(32), !inDetail);
-        move(displaysButton_, nav + px(138), px(17), px(49), px(32), !inDetail);
-        move(boardButton_, nav + px(190), px(17), px(39), px(32), !inDetail);
-        move(settingsButton_, nav + px(232), px(17), px(39), px(32), !inDetail);
+        const std::array tabs{liveButton_, historyButton_, displaysButton_, boardButton_, settingsButton_};
+        const std::array captions{LiveButton, HistoryButton, DisplaysButton, BoardButton, SettingsButton};
+        const int tabGap = px(3);
+        std::array<int, tabs.size()> widths{};
+        int minimumWidth = tabGap * static_cast<int>(tabs.size() - 1);
+        const auto dc = GetDC(window_);
+        for (size_t i = 0; i < tabs.size(); ++i) {
+            const std::wstring_view caption = buttonCaption(captions[i]);
+            const int captionWidth = dc ? textWidth(dc, normalFont_, caption) : px(13 * static_cast<int>(caption.size()));
+            widths[i] = captionWidth + 2 * px(ui::TabTextInset) + px(2);
+            minimumWidth += widths[i];
+        }
+        if (dc) ReleaseDC(window_, dc);
+        const int extraPerTab = std::clamp(
+            (static_cast<int>(area.right) - pad - nav - minimumWidth) / static_cast<int>(tabs.size()), 0, px(12));
+        int x = nav;
+        for (size_t i = 0; i < tabs.size(); ++i) {
+            const int width = widths[i] + extraPerTab;
+            move(tabs[i], x, px(17), width, px(32), !inDetail);
+            x += width + tabGap;
+        }
         move(refreshDisplaysButton_, area.right - pad - px(62), px(87), px(62), px(28), tab_ == Tab::Displays);
         move(detailBackButton_, nav, px(17), px(118), px(32), inDetail);
         move(cpuCombo_, cards_[0].left + px(CardInset), cards_[0].top + px(CardTools), px(125), px(125), overview);

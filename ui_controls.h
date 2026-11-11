@@ -9,6 +9,8 @@ namespace cw::ui {
 
 enum class ButtonKind { Tab, Action, Primary, Sort };
 
+inline constexpr int TabTextInset = 4;
+
 struct Palette {
     COLORREF background;
     COLORREF surface;
@@ -207,7 +209,7 @@ inline bool drawButton(const DRAWITEMSTRUCT& item, int dpi, ButtonKind kind, boo
     }
 
     RECT bounds = item.rcItem;
-    InflateRect(&bounds, -detail::px(7, dpi), 0);
+    InflateRect(&bounds, -detail::px(kind == ButtonKind::Tab ? TabTextInset : 7, dpi), 0);
     if (item.itemState & ODS_SELECTED) {
         OffsetRect(&bounds, 0, detail::px(1, dpi));
     }
