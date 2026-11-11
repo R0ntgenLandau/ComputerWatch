@@ -241,7 +241,7 @@ public:
         : instance_(instance), callbacks_(std::move(callbacks)) {}
 
     ~Dashboard() {
-        for (auto font : {normalFont_, smallFont_, titleFont_, valueFont_, compactValueFont_, boldFont_}) {
+        for (auto font : {normalFont_, smallFont_, brandFont_, titleFont_, valueFont_, compactValueFont_, boldFont_}) {
             if (font) {
                 DeleteObject(font);
             }
@@ -519,9 +519,11 @@ private:
     }
 
     void refreshFonts() {
-        const auto oldFonts = std::array{normalFont_, smallFont_, titleFont_, valueFont_, compactValueFont_, boldFont_};
+        const auto oldFonts = std::array{normalFont_, smallFont_, brandFont_, titleFont_, valueFont_,
+            compactValueFont_, boldFont_};
         normalFont_ = font(13);
         smallFont_ = font(12);
+        brandFont_ = readingFont_ ? font(18, FW_BOLD, ReadingFontFamily) : font(18, FW_SEMIBOLD, L"Segoe UI");
         titleFont_ = readingFont_ ? font(20, FW_BOLD, ReadingFontFamily) : font(20, FW_SEMIBOLD, L"Segoe UI");
         valueFont_ = readingFont_ ? font(34, FW_BOLD, ReadingFontFamily) : font(34, FW_SEMIBOLD, L"Consolas");
         compactValueFont_ = readingFont_ ? font(15, FW_BOLD, ReadingFontFamily) : nullptr;
@@ -2005,7 +2007,7 @@ private:
         const int pad = px(PageInset);
         line(dc, 0, px(60), area.right, px(60), theme_->border);
         DrawIconEx(dc, pad, px(18), appIcon_, px(28), px(28), 0, nullptr, DI_NORMAL);
-        label(dc, titleFont_, L"Computer Watch", {pad + px(34), px(14), pad + px(204), px(50)});
+        label(dc, brandFont_, L"Computer Watch", {pad + px(34), px(14), pad + px(204), px(50)});
         if (tab_ == Tab::Settings) {
             paintSettings(dc, area);
             return;
@@ -2122,7 +2124,7 @@ private:
     POINT cursor_{-1, -1};
     std::wstring tooltipText_;
     std::array<HWND, 4> sortButtons_{};
-    HFONT normalFont_{}, smallFont_{}, titleFont_{}, valueFont_{}, compactValueFont_{}, boldFont_{};
+    HFONT normalFont_{}, smallFont_{}, brandFont_{}, titleFont_{}, valueFont_{}, compactValueFont_{}, boldFont_{};
     HANDLE readingFont_{};
     HBRUSH surfaceBrush_{};
     bool darkMode_{};
