@@ -106,7 +106,7 @@ const wchar_t* readingStatus(ReadingStatus status) {
     return L"read_failed";
 }
 
-enum class Tab { Live, History, Displays, Settings, CpuDetails, GpuDetails, DiskDetails, MemoryDetails };
+enum class Tab { Live, History, Displays, Board, Settings, CpuDetails, GpuDetails, DiskDetails, MemoryDetails };
 enum class RankField { Cpu, Memory };
 
 struct RankSort {
@@ -120,7 +120,7 @@ enum ControlId {
     CpuDetailButton, GpuDetailButton, DiskDetailButton, DetailBackButton, CoreList, DiskList,
     LeftSortCpu, LeftSortMemory, RightSortCpu, RightSortMemory, LightThemeButton, DarkThemeButton, CopyMcpButton,
     DisplaysButton, DisplayList, RefreshDisplaysButton, MemoryDetailButton,
-    MemoryPlotButton, MemoryTimingButton, ImportMemoryTimingButton, MemoryTimingList, DiskSmartList
+    MemoryPlotButton, MemoryTimingButton, ImportMemoryTimingButton, MemoryTimingList, DiskSmartList, BoardButton
 };
 
 const wchar_t* buttonCaption(unsigned id) {
@@ -128,6 +128,7 @@ const wchar_t* buttonCaption(unsigned id) {
     case LiveButton: return L"实时监控";
     case HistoryButton: return L"历史记录";
     case DisplaysButton: return L"显示器";
+    case BoardButton: return L"主板";
     case RefreshDisplaysButton: return L"刷新";
     case SettingsButton: return L"设置";
     case CpuDetailButton:
@@ -591,7 +592,7 @@ private:
         valueFont_ = readingFont_ ? font(34, FW_BOLD, ReadingFontFamily) : font(34, FW_SEMIBOLD, L"Consolas");
         compactValueFont_ = readingFont_ ? font(15, FW_BOLD, ReadingFontFamily) : nullptr;
         boldFont_ = font(15, FW_SEMIBOLD);
-        for (const auto child : {liveButton_, historyButton_, displaysButton_, settingsButton_, cpuCombo_, gpuCombo_, rangeCombo_,
+        for (const auto child : {liveButton_, historyButton_, displaysButton_, boardButton_, settingsButton_, cpuCombo_, gpuCombo_, rangeCombo_,
             cpuDetailButton_, memoryDetailButton_, gpuDetailButton_, diskDetailButton_, detailBackButton_, picker_, queryButton_,
             memoryPlotButton_, memoryTimingButton_, importMemoryTimingButton_,
             retentionEdit_, saveButton_, lightThemeButton_, darkThemeButton_, copyMcpButton_, refreshDisplaysButton_,
@@ -611,6 +612,7 @@ private:
         liveButton_ = button(LiveButton);
         historyButton_ = button(HistoryButton);
         displaysButton_ = button(DisplaysButton);
+        boardButton_ = button(BoardButton);
         refreshDisplaysButton_ = button(RefreshDisplaysButton);
         settingsButton_ = button(SettingsButton);
         cpuCombo_ = combo(CpuCombo, {L"占用率 %", L"封装温度 °C", L"封装功耗 W"});
@@ -730,7 +732,7 @@ private:
     }
 
     int statusOffset(RECT area) const {
-        const int inlineWidth = detailPane() == DetailPane::None ? 822 : 755;
+        const int inlineWidth = detailPane() == DetailPane::None ? 852 : 755;
         return area.right < px(inlineWidth) ? px(22) : 0;
     }
 
@@ -744,6 +746,15 @@ private:
     int displayPageHeight() const {
         const auto display = selectedDisplay();
         return display && display->gamut ? DisplayPlotPageHeight : DisplayPageHeight;
+    }
+
+    int boardPageHeight() const {
+        int bottom = 124;
+        if (!inventory_ || inventory_->board.empty()) return bottom + 82;
+        for (const auto& section : inventory_->board) {
+            bottom += 48 + 23 * static_cast<int>(std::max<size_t>(1, section.fields.size()));
+        }
+        return bottom + PageInset;
     }
 
     int memoryTimingTop() const {
@@ -819,6 +830,7 @@ private:
         const bool overview = live || history;
         const int contentBottom = overview ? rankPanel(area, 1).bottom + pad :
             px(settings ? McpCardBottom + PageInset : tab_ == Tab::Displays ? displayPageHeight() :
+                tab_ == Tab::Board ? boardPageHeight() :
                 detail == DetailPane::Memory ? memoryPageHeight() : detail == DetailPane::Disk ? DiskPageHeight :
                 detail == DetailPane::Gpu ? GpuPageHeight : 390);
         scrollMax_ = std::max(0, contentBottom - static_cast<int>(area.bottom));
@@ -842,10 +854,11 @@ private:
         };
 
         const int nav = pad + px(209);
-        move(liveButton_, nav, px(17), px(78), px(32), !inDetail);
-        move(historyButton_, nav + px(82), px(17), px(78), px(32), !inDetail);
-        move(displaysButton_, nav + px(164), px(17), px(60), px(32), !inDetail);
-        move(settingsButton_, nav + px(228), px(17), px(50), px(32), !inDetail);
+        move(liveButton_, nav, px(17), px(66), px(32), !inDetail);
+        move(historyButton_, nav + px(69), px(17), px(66), px(32), !inDetail);
+        move(displaysButton_, nav + px(138), px(17), px(49), px(32), !inDetail);
+        move(boardButton_, nav + px(190), px(17), px(39), px(32), !inDetail);
+        move(settingsButton_, nav + px(232), px(17), px(39), px(32), !inDetail);
         move(refreshDisplaysButton_, area.right - pad - px(62), px(87), px(62), px(28), tab_ == Tab::Displays);
         move(detailBackButton_, nav, px(17), px(118), px(32), inDetail);
         move(cpuCombo_, cards_[0].left + px(CardInset), cards_[0].top + px(CardTools), px(125), px(125), overview);
@@ -1105,7 +1118,7 @@ private:
     void refreshLive() {
         if (!inventory_ && callbacks_.inventory) {
             inventory_ = callbacks_.inventory();
-            if (inventory_ && (tab_ == Tab::Live || tab_ == Tab::MemoryDetails)) layout();
+            if (inventory_ && (tab_ == Tab::Live || tab_ == Tab::MemoryDetails || tab_ == Tab::Board)) layout();
         }
         try {
             live_ = callbacks_.live ? callbacks_.live() : std::vector<Snapshot>{};
@@ -1323,7 +1336,7 @@ private:
     void activate(Tab target) {
         tab_ = target;
         scroll_ = 0;
-        for (const auto child : {liveButton_, historyButton_, displaysButton_, settingsButton_}) {
+        for (const auto child : {liveButton_, historyButton_, displaysButton_, boardButton_, settingsButton_}) {
             InvalidateRect(child, nullptr, FALSE);
         }
         layout();
@@ -1427,7 +1440,7 @@ private:
         const auto caption = buttonCaption(id);
         if (!caption) return false;
         auto kind = ButtonKind::Action;
-        if (id == LiveButton || id == HistoryButton || id == DisplaysButton || id == SettingsButton ||
+        if (id == LiveButton || id == HistoryButton || id == DisplaysButton || id == BoardButton || id == SettingsButton ||
             id == DetailBackButton) {
             kind = ButtonKind::Tab;
         } else if (id == QueryButton || id == SaveButton) {
@@ -1435,7 +1448,7 @@ private:
         }
         const bool selected = (id == LiveButton && tab_ == Tab::Live) ||
             (id == HistoryButton && tab_ == Tab::History) || (id == DisplaysButton && tab_ == Tab::Displays) ||
-            (id == SettingsButton && tab_ == Tab::Settings) ||
+            (id == BoardButton && tab_ == Tab::Board) || (id == SettingsButton && tab_ == Tab::Settings) ||
             (id == LightThemeButton && !darkMode_) || (id == DarkThemeButton && darkMode_);
         return ui::drawButton(item, dpi_, kind, selected, normalFont_, caption, *theme_);
     }
@@ -1502,7 +1515,8 @@ private:
             }
             break;
         case WM_TIMER:
-            if (wParam == RefreshTimer && (tab_ == Tab::Live || detailPane() != DetailPane::None)
+            if (wParam == RefreshTimer && (tab_ == Tab::Live || detailPane() != DetailPane::None ||
+                (tab_ == Tab::Board && !inventory_))
                 && visible_.value_or(false)) {
                 refreshLive();
             }
@@ -1545,6 +1559,7 @@ private:
             case LiveButton: activate(Tab::Live); break;
             case HistoryButton: activate(Tab::History); break;
             case DisplaysButton: activate(Tab::Displays); break;
+            case BoardButton: activate(Tab::Board); break;
             case RefreshDisplaysButton: refreshDisplays(); break;
             case SettingsButton: activate(Tab::Settings); break;
             case QueryButton: queryHistory(); break;
@@ -2321,6 +2336,36 @@ private:
         }
     }
 
+    void paintBoard(HDC dc, RECT area) const {
+        const int pad = px(PageInset);
+        const int right = area.right - pad;
+        label(dc, titleFont_, L"主板信息", {pad, px(83), right, px(120)});
+        if (!inventory_ || inventory_->board.empty()) {
+            label(dc, normalFont_, inventory_ ? L"无法读取 SMBIOS 主板清单。" : L"等待读取硬件清单。",
+                {pad, px(124), right, px(156)}, theme_->muted);
+            return;
+        }
+        int top = 124;
+        for (const auto& section : inventory_->board) {
+            const int bottom = top + 48 + 23 * static_cast<int>(std::max<size_t>(1, section.fields.size()));
+            const int left = pad + px(14);
+            const int valueLeft = left + (right - left) * 44 / 100;
+            rounded(dc, {pad, px(top), right, px(bottom - 8)}, px(14), theme_->surface, theme_->border);
+            label(dc, boldFont_, section.title, {left, px(top + 7), right - px(14), px(top + 34)});
+            int y = top + 34;
+            if (section.fields.empty()) {
+                label(dc, smallFont_, L"固件未提供记录", {left, px(y), right - px(14), px(y + 23)}, theme_->muted);
+            }
+            for (const auto& [name, reading] : section.fields) {
+                label(dc, smallFont_, name, {left, px(y), valueLeft - px(8), px(y + 23)}, theme_->secondary);
+                label(dc, normalFont_, reading.empty() ? L"—" : reading,
+                    {valueLeft, px(y), right - px(14), px(y + 23)});
+                y += 23;
+            }
+            top = bottom;
+        }
+    }
+
     void paintDisplays(HDC dc, RECT area) const {
         const int pad = px(PageInset);
         const int right = area.right - pad;
@@ -2383,6 +2428,10 @@ private:
         }
         if (tab_ == Tab::Displays) {
             paintDisplays(dc, area);
+            return;
+        }
+        if (tab_ == Tab::Board) {
+            paintBoard(dc, area);
             return;
         }
 
@@ -2479,7 +2528,7 @@ private:
     HICON appIcon_{}, trayIcon_{};
     UiCallbacks callbacks_;
     HWND window_{}, liveButton_{}, historyButton_{}, settingsButton_{}, cpuCombo_{}, gpuCombo_{};
-    HWND displaysButton_{}, displayList_{}, refreshDisplaysButton_{};
+    HWND displaysButton_{}, boardButton_{}, displayList_{}, refreshDisplaysButton_{};
     HWND picker_{}, rangeCombo_{}, queryButton_{}, retentionEdit_{}, saveButton_{};
     HWND lightThemeButton_{}, darkThemeButton_{};
     HWND copyMcpButton_{};

@@ -147,6 +147,148 @@ MemoryDevice readMemoryDevice(const BYTE* entry, const BYTE* strings, const BYTE
     return device;
 }
 
+std::wstring firmwareCode(BYTE code) {
+    wchar_t result[5]{};
+    std::swprintf(result, std::size(result), L"0x%02X", static_cast<unsigned>(code));
+    return result;
+}
+
+template <size_t N>
+std::wstring firmwareEnum(const wchar_t* const (&names)[N], BYTE code) {
+    if (!code) return {};
+    return code < N && names[code] ? names[code] : firmwareCode(code);
+}
+
+std::wstring slotType(BYTE code) {
+    constexpr BYTE pcie[]{0xa5, 0xab, 0xb1, 0xb8, 0xbe};
+    constexpr const wchar_t* widths[]{L"", L" x1", L" x2", L" x4", L" x8", L" x16"};
+    for (size_t i = 0; i < std::size(pcie); ++i) {
+        if (code >= pcie[i] && code < pcie[i] + std::size(widths)) {
+            return L"PCIe Gen " + std::to_wstring(i + 1) + widths[code - pcie[i]];
+        }
+    }
+    if (code == 6) return L"PCI";
+    if (code == 0x0e) return L"PCI-X";
+    if (code >= 0x14 && code <= 0x17) return L"M.2";
+    if (code == 0xc4) return L"PCIe Gen 6+";
+    return code > 2 ? firmwareCode(code) : std::wstring{};
+}
+
+void readBoardRecord(const BYTE* entry, const BYTE* strings, const BYTE* end,
+    std::vector<BoardSection>& boards, BoardSection& bios, BoardSection& slots,
+    BoardSection& ports, BoardSection& devices, BoardSection& legacyDevices) {
+    const size_t length = strings - entry;
+    const auto byte = [&](size_t offset) -> BYTE { return offset < length ? entry[offset] : 0; };
+    const auto text = [&](size_t offset) { return firmwareString(strings, end, byte(offset)); };
+    const auto release = [&](size_t offset) -> std::wstring {
+        if (length < offset + 2 || entry[offset] == 0xff || entry[offset + 1] == 0xff) return {};
+        return std::to_wstring(entry[offset]) + L"." + std::to_wstring(entry[offset + 1]);
+    };
+    const auto pciAddress = [&](size_t offset) -> std::wstring {
+        if (length < offset + 4 || entry[offset + 2] == 0xff || entry[offset + 3] == 0xff) return {};
+        const unsigned segment = entry[offset] | (entry[offset + 1] << 8);
+        if (segment == 0xffff) return {};
+        const unsigned bus = entry[offset + 2];
+        const unsigned function = entry[offset + 3];
+        wchar_t address[16]{};
+        std::swprintf(address, std::size(address), L"%04X:%02X:%02X.%X", segment, bus, function >> 3, function & 7);
+        return address;
+    };
+    const auto append = [](std::wstring& target, const std::wstring& value) {
+        if (value.empty()) return;
+        if (!target.empty()) target += L" · ";
+        target += value;
+    };
+    const auto add = [](BoardSection& section, std::wstring name, std::wstring value, const wchar_t* fallback) {
+        if (name.empty()) name = fallback + (L" " + std::to_wstring(section.fields.size() + 1));
+        section.fields.emplace_back(std::move(name), std::move(value));
+    };
+    constexpr const wchar_t* deviceTypes[]{nullptr, L"其他", nullptr, L"显卡", L"SCSI", L"以太网",
+        L"令牌环网", L"音频", L"PATA", L"SATA", L"SAS", L"无线网卡", L"蓝牙", L"WWAN", L"eMMC", L"NVMe", L"UFS"};
+
+    switch (entry[0]) {
+    case 0:
+        if (length < 0x12) break;
+        bios.fields = {{L"厂商", text(4)}, {L"版本", text(5)}, {L"发布日期", text(8)},
+            {L"系统 BIOS 修订版", release(0x14)}, {L"嵌入式控制器版本", release(0x16)},
+            {L"支持 UEFI", length > 0x13 ? (byte(0x13) & 8 ? L"是" : L"否") : L""}};
+        if (byte(9) != 0xff) {
+            bios.fields.emplace_back(L"固件 ROM 容量", std::to_wstring((byte(9) + 1) * 64) + L" KiB");
+        } else if (length >= 0x1a) {
+            const unsigned rom = byte(0x18) | (byte(0x19) << 8);
+            if ((rom & 0x3fff) && (rom >> 14) <= 1) {
+                bios.fields.emplace_back(L"固件 ROM 容量", std::to_wstring(rom & 0x3fff) +
+                    (rom >> 14 ? L" GiB" : L" MiB"));
+            }
+        }
+        break;
+    case 2: {
+        if (length < 8) break;
+        constexpr const wchar_t* types[]{nullptr, L"未知", L"其他", L"服务器刀片", L"连接模块", L"系统管理模块",
+            L"处理器模块", L"I/O 模块", L"内存模块", L"子板", L"主板", L"处理器与内存模块",
+            L"处理器与 I/O 模块", L"互连板"};
+        constexpr const wchar_t* flags[]{L"承载系统", L"需子板", L"可拆卸", L"可更换", L"可热插拔"};
+        std::wstring features;
+        for (size_t i = 0; i < std::size(flags); ++i) {
+            if (byte(9) & (1 << i)) append(features, flags[i]);
+        }
+        if (length > 9 && features.empty()) features = L"无已声明特性";
+        boards.push_back({L"主板与模块", {{L"厂商", text(4)}, {L"型号", text(5)}, {L"硬件版本", text(6)},
+            {L"序列号", text(7)}, {L"资产标签", text(8)}, {L"机箱内位置", text(0x0a)},
+            {L"板卡类型", firmwareEnum(types, byte(0x0d))}, {L"板卡特性", std::move(features)}}});
+        break;
+    }
+    case 8: {
+        if (length < 9) break;
+        auto external = text(6);
+        auto internal = text(4);
+        std::wstring endpoints;
+        if (!external.empty()) append(endpoints, L"外部 " + external);
+        if (!internal.empty()) append(endpoints, L"内部 " + internal);
+        constexpr const wchar_t* types[]{L"未指定", L"并口 XT/AT", L"并口 PS/2", L"并口 ECP", L"并口 EPP",
+            L"并口 ECP/EPP", L"串口 XT/AT", L"串口 16450", L"串口 16550", L"串口 16550A", L"SCSI",
+            L"MIDI", L"游戏端口", L"键盘", L"鼠标", L"SSA SCSI", L"USB", L"FireWire", L"PCMCIA I",
+            L"PCMCIA II", L"PCMCIA III", L"CardBus", L"Access Bus", L"SCSI II", L"SCSI Wide", L"PC-98",
+            L"PC-98-Hireso", L"PC-H98", L"视频", L"音频", L"调制解调器", L"网络", L"SATA", L"SAS",
+            L"MFDP", L"Thunderbolt"};
+        const auto type = byte(8);
+        std::wstring description = type < std::size(types) ? types[type] : firmwareCode(type);
+        if (byte(5) || byte(7)) {
+            description += L" · 接头（内/外） " + firmwareCode(byte(5)) + L"/" + firmwareCode(byte(7));
+        }
+        add(ports, std::move(endpoints), std::move(description), L"端口");
+        break;
+    }
+    case 9: {
+        if (length < 0x0c) break;
+        constexpr const wchar_t* widths[]{nullptr, L"其他", L"位宽未知", L"8 bit", L"16 bit", L"32 bit", L"64 bit",
+            L"128 bit", L"x1", L"x2", L"x4", L"x8", L"x16", L"x32"};
+        constexpr const wchar_t* usage[]{nullptr, L"其他", nullptr, L"可用", L"使用中", L"不可用"};
+        auto description = slotType(byte(5));
+        append(description, firmwareEnum(widths, byte(6)));
+        append(description, byte(7) == 2 ? L"占用状态未知" : firmwareEnum(usage, byte(7)));
+        append(description, pciAddress(0x0d));
+        add(slots, text(4), std::move(description), L"插槽");
+        break;
+    }
+    case 10:
+        for (size_t offset = 4; offset + 1 < length; offset += 2) {
+            auto description = firmwareEnum(deviceTypes, byte(offset) & 0x7f);
+            append(description, byte(offset) & 0x80 ? L"已启用" : L"已禁用");
+            add(legacyDevices, text(offset + 1), std::move(description), L"设备");
+        }
+        break;
+    case 41: {
+        if (length < 0x0b) break;
+        auto description = firmwareEnum(deviceTypes, byte(5) & 0x7f);
+        append(description, byte(5) & 0x80 ? L"已启用" : L"已禁用");
+        append(description, pciAddress(7));
+        add(devices, text(4), std::move(description), L"设备");
+        break;
+    }
+    }
+}
+
 void readFirmwareModels(HardwareInventory& inventory) {
     constexpr DWORD rawSmbios = 0x52534D42; // RSMB
     constexpr UINT headerSize = 8;
@@ -158,6 +300,12 @@ void readFirmwareModels(HardwareInventory& inventory) {
     std::memcpy(&length, bytes.data() + 4, sizeof(length));
     if (length > size - headerSize) return;
 
+    std::vector<BoardSection> boards;
+    BoardSection bios{L"BIOS 与启动固件", {}};
+    BoardSection slots{L"扩展插槽", {}};
+    BoardSection ports{L"板载端口与接头", {}};
+    BoardSection devices{L"板载设备", {}};
+    BoardSection legacyDevices{L"板载设备", {}};
     const auto* entry = bytes.data() + headerSize;
     const auto* end = entry + length;
     while (end - entry >= 4 && entry[0] != 127) {
@@ -180,9 +328,23 @@ void readFirmwareModels(HardwareInventory& inventory) {
                     (device.partNumber.empty() ? L"型号未提供" : device.partNumber));
             }
             inventory.memoryDevices.push_back(std::move(device));
+        } else {
+            readBoardRecord(entry, strings, last, boards, bios, slots, ports, devices, legacyDevices);
         }
         entry = last + 2;
     }
+    bios.fields.emplace_back(L"SMBIOS 版本", std::to_wstring(bytes[1]) + L"." + std::to_wstring(bytes[2]));
+    FIRMWARE_TYPE firmware{};
+    if (GetFirmwareType(&firmware)) {
+        if (firmware == FirmwareTypeUefi) bios.fields.emplace_back(L"当前启动模式", L"UEFI");
+        if (firmware == FirmwareTypeBios) bios.fields.emplace_back(L"当前启动模式", L"传统 BIOS");
+    }
+    if (boards.empty()) boards.push_back({L"主板与模块", {}});
+    inventory.board = std::move(boards);
+    inventory.board.push_back(std::move(bios));
+    inventory.board.push_back(std::move(slots));
+    inventory.board.push_back(std::move(ports));
+    inventory.board.push_back(devices.fields.empty() ? std::move(legacyDevices) : std::move(devices));
 }
 
 std::wstring windowsProcessorName() {
@@ -191,6 +353,50 @@ std::wstring windowsProcessorName() {
     if (RegGetValueW(HKEY_LOCAL_MACHINE, L"HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0",
         L"ProcessorNameString", RRF_RT_REG_SZ, nullptr, name, &size) != ERROR_SUCCESS) return {};
     return name;
+}
+
+BoardSection chipsetDevices() {
+    BoardSection section{L"芯片组相关 PCI 设备", {}};
+    const auto devices = SetupDiGetClassDevsW(nullptr, L"PCI", nullptr, DIGCF_PRESENT | DIGCF_ALLCLASSES);
+    if (devices == INVALID_HANDLE_VALUE) return section;
+    const auto destroy = [](void* value) { SetupDiDestroyDeviceInfoList(value); };
+    const std::unique_ptr<void, decltype(destroy)> guard(devices, destroy);
+    for (DWORD index = 0; ; ++index) {
+        SP_DEVINFO_DATA device{};
+        device.cbSize = sizeof(device);
+        if (!SetupDiEnumDeviceInfo(devices, index, &device)) break;
+        wchar_t ids[512]{};
+        DWORD size{};
+        if (!SetupDiGetDeviceRegistryPropertyW(devices, &device, SPDRP_COMPATIBLEIDS, nullptr,
+            reinterpret_cast<BYTE*>(ids), sizeof(ids), &size)) continue;
+        std::wstring_view role;
+        const auto* end = ids + std::min<size_t>(size / sizeof(wchar_t), std::size(ids));
+        for (const auto* id = ids; id < end && *id; ) {
+            const auto* stop = std::find(id, end, L'\0');
+            const std::wstring_view code(id, stop - id);
+            if (code == L"PCI\\CC_0601") role = L"ISA / LPC / eSPI 桥";
+            if (code == L"PCI\\CC_0C05") role = L"SMBus 控制器";
+            if (!role.empty() || stop == end) break;
+            id = stop + 1;
+        }
+        if (role.empty()) continue;
+        wchar_t instance[MAX_DEVICE_ID_LEN]{};
+        std::wstring hardwareId;
+        if (SetupDiGetDeviceInstanceIdW(devices, &device, instance, std::size(instance), nullptr)) {
+            const std::wstring_view id(instance);
+            if (id.starts_with(L"PCI\\VEN_") && id.size() >= 21) hardwareId = id.substr(4, 17);
+        }
+        wchar_t name[256]{};
+        SetupDiGetDeviceRegistryPropertyW(devices, &device, SPDRP_DEVICEDESC, nullptr,
+            reinterpret_cast<BYTE*>(name), sizeof(name), nullptr);
+        std::wstring description(name);
+        if (!hardwareId.empty()) {
+            if (!description.empty()) description += L" · ";
+            description += hardwareId;
+        }
+        section.fields.emplace_back(role, std::move(description));
+    }
+    return section;
 }
 
 std::vector<std::wstring> graphicsModels() {
@@ -870,6 +1076,8 @@ struct Telemetry::Impl {
     HardwareInventory inventory() const {
         HardwareInventory result;
         readFirmwareModels(result);
+        auto chipset = chipsetDevices();
+        if (!chipset.fields.empty()) result.board.push_back(std::move(chipset));
         ULONGLONG installedKiB{};
         if (GetPhysicallyInstalledSystemMemory(&installedKiB)) {
             result.installedMemory = installedKiB * 1024.0;

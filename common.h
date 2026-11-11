@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace cw {
@@ -108,11 +109,17 @@ struct GpuSpecifications {
     double hostMaxPcieWidth = Missing;
 };
 
+struct BoardSection {
+    std::wstring title;
+    std::vector<std::pair<std::wstring, std::wstring>> fields;
+};
+
 struct HardwareInventory {
     std::vector<std::wstring> processors, memory, disks, graphics;
     std::wstring sampledGpu;
     GpuSpecifications gpu;
     std::vector<MemoryDevice> memoryDevices;
+    std::vector<BoardSection> board;
     double installedMemory = Missing;
 };
 
