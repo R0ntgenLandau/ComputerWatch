@@ -690,14 +690,6 @@ private:
         applyTheme();
     }
 
-    void move(HWND control, int x, int y, int width, int height, bool showControl = true) {
-        y -= scroll_;
-        const bool wasVisible = (GetWindowLongPtrW(control, GWL_STYLE) & WS_VISIBLE) != 0;
-        const UINT visibility = showControl == wasVisible ? 0 : showControl ? SWP_SHOWWINDOW : SWP_HIDEWINDOW;
-        SetWindowPos(control, nullptr, x, y, std::max(width, 0), std::max(height, 0),
-            SWP_NOZORDER | SWP_NOACTIVATE | visibility);
-    }
-
     DetailPane detailPane() const {
         if (tab_ == Tab::MemoryDetails) {
             return DetailPane::Memory;
@@ -783,7 +775,7 @@ private:
         return 26 + static_cast<int>(height);
     }
 
-    void layout() {
+    void layout(UINT moveFlags = 0) {
         RECT area{};
         GetClientRect(window_, &area);
         TOOLINFOW tool{};
@@ -825,9 +817,16 @@ private:
         RECT afterScroll{};
         GetClientRect(window_, &afterScroll);
         if (afterScroll.right != area.right) {
-            layout();
+            layout(moveFlags);
             return;
         }
+
+        const auto move = [&](HWND control, int x, int y, int width, int height, bool showControl) {
+            const bool wasVisible = (GetWindowLongPtrW(control, GWL_STYLE) & WS_VISIBLE) != 0;
+            const UINT visibility = showControl == wasVisible ? 0 : showControl ? SWP_SHOWWINDOW : SWP_HIDEWINDOW;
+            SetWindowPos(control, nullptr, x, y - scroll_, std::max(width, 0), std::max(height, 0),
+                SWP_NOZORDER | SWP_NOACTIVATE | visibility | moveFlags);
+        };
 
         const int nav = pad + px(209);
         move(liveButton_, nav, px(17), px(78), px(32), !inDetail);
@@ -885,8 +884,9 @@ private:
         scroll_ = position;
         cursor_ = {-1, -1};
         SendMessageW(rankTooltip_, TTM_POP, 0, 0);
-        layout();
-        invalidate();
+        // Repaint the canvas and children together after all controls reach their new positions.
+        layout(SWP_NOREDRAW | SWP_NOCOPYBITS);
+        RedrawWindow(window_, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
     }
 
     void invalidate() const { InvalidateRect(window_, nullptr, FALSE); }
