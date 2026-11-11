@@ -56,6 +56,7 @@ foreach ($architecture in 'x86', 'x64', 'arm64') {
     Copy-Item -LiteralPath (Join-Path $package 'README.md') -Destination $staging -Force
     Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'LICENSE'), (Join-Path $PSScriptRoot 'THIRD-PARTY-NOTICES.md') -Destination $staging -Force
     Copy-Item -LiteralPath $pawnSource -Destination $licenses -Force
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'assets/anonymous-pro/OFL.txt') -Destination (Join-Path $licenses 'Anonymous-Pro-OFL.txt') -Force
     Copy-Item -LiteralPath (Join-Path $buildRoot $pawnLicense) -Destination (Join-Path $licenses 'PawnIO.Modules-LGPL-2.1.txt') -Force
     if ($architecture -eq 'x64') {
         Copy-Item -LiteralPath (Join-Path $gccLicenses 'gcc-libs/COPYING.RUNTIME') -Destination (Join-Path $licenses 'GCC-Runtime-Exception.txt') -Force

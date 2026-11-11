@@ -51,6 +51,7 @@ try {
         ('1 24 "{0}/ComputerWatch.manifest"' -f $sourcePrefix)
         ('1 ICON "{0}/ComputerWatch.ico"' -f $sourcePrefix)
         ('101 RCDATA "{0}/IntelMSR.bin"' -f $modulePrefix)
+        ('102 RCDATA "{0}/assets/anonymous-pro/AnonymousPro-Bold.ttf"' -f $sourcePrefix)
         ('#include "{0}/version.rc"' -f $sourcePrefix)
     ) | Set-Content -LiteralPath 'resources.rc' -Encoding Ascii
     & $resourceCompiler -i resources.rc -o resources.o -O coff

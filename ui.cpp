@@ -23,6 +23,8 @@ namespace {
 
 constexpr wchar_t WindowClass[] = L"ComputerWatchDashboard";
 constexpr WORD ApplicationIcon = 1;
+constexpr WORD ReadingFontResource = 102;
+constexpr wchar_t ReadingFontFamily[] = L"Anonymous Pro";
 constexpr UINT ShowMessage = WM_APP + 1;
 constexpr UINT TrayMessage = WM_APP + 2;
 constexpr UINT ButtonMessage = WM_APP + 3;
@@ -225,15 +227,23 @@ public:
         : instance_(instance), callbacks_(std::move(callbacks)) {}
 
     ~Dashboard() {
-        for (auto font : {normalFont_, smallFont_, titleFont_, valueFont_, boldFont_}) {
+        for (auto font : {normalFont_, smallFont_, titleFont_, valueFont_, compactValueFont_, boldFont_}) {
             if (font) {
                 DeleteObject(font);
             }
         }
+        if (readingFont_) RemoveFontMemResourceEx(readingFont_);
         if (surfaceBrush_) DeleteObject(surfaceBrush_);
     }
 
     bool create(bool startVisible) {
+        const auto resource = FindResourceW(instance_, MAKEINTRESOURCEW(ReadingFontResource), RT_RCDATA);
+        if (resource) {
+            if (auto* bytes = LockResource(LoadResource(instance_, resource))) {
+                DWORD count = 0;
+                readingFont_ = AddFontMemResourceEx(bytes, SizeofResource(instance_, resource), nullptr, &count);
+            }
+        }
         darkMode_ = callbacks_.darkMode && callbacks_.darkMode();
         theme_ = &ui::palette(darkMode_);
         WNDCLASSEXW windowClass{};
@@ -495,11 +505,12 @@ private:
     }
 
     void refreshFonts() {
-        const auto oldFonts = std::array{normalFont_, smallFont_, titleFont_, valueFont_, boldFont_};
+        const auto oldFonts = std::array{normalFont_, smallFont_, titleFont_, valueFont_, compactValueFont_, boldFont_};
         normalFont_ = font(13);
         smallFont_ = font(12);
-        titleFont_ = font(20, FW_SEMIBOLD, L"Segoe UI");
-        valueFont_ = font(34, FW_SEMIBOLD, L"Consolas");
+        titleFont_ = readingFont_ ? font(20, FW_BOLD, ReadingFontFamily) : font(20, FW_SEMIBOLD, L"Segoe UI");
+        valueFont_ = readingFont_ ? font(34, FW_BOLD, ReadingFontFamily) : font(34, FW_SEMIBOLD, L"Consolas");
+        compactValueFont_ = readingFont_ ? font(15, FW_BOLD, ReadingFontFamily) : nullptr;
         boldFont_ = font(15, FW_SEMIBOLD);
         for (const auto child : {liveButton_, historyButton_, settingsButton_, cpuCombo_, gpuCombo_, rangeCombo_,
             cpuDetailButton_, gpuDetailButton_, diskDetailButton_, detailBackButton_, picker_, queryButton_,
@@ -1511,7 +1522,7 @@ private:
         const auto separator = text.find_first_of(L" %");
         const auto number = text.substr(0, separator);
         const auto valueFace = textWidth(dc, valueFont_, text) > area.right - area.left && area.right - area.left < px(110)
-            ? boldFont_ : valueFont_;
+            ? (compactValueFont_ ? compactValueFont_ : boldFont_) : valueFont_;
         label(dc, valueFace, number, area);
         if (separator != std::wstring_view::npos) {
             const auto unit = text.substr(separator + (text[separator] == L' ' ? 1 : 0));
@@ -1931,7 +1942,8 @@ private:
     POINT cursor_{-1, -1};
     std::wstring tooltipText_;
     std::array<HWND, 4> sortButtons_{};
-    HFONT normalFont_{}, smallFont_{}, titleFont_{}, valueFont_{}, boldFont_{};
+    HFONT normalFont_{}, smallFont_{}, titleFont_{}, valueFont_{}, compactValueFont_{}, boldFont_{};
+    HANDLE readingFont_{};
     HBRUSH surfaceBrush_{};
     bool darkMode_{};
     const ui::Palette* theme_ = &ui::LightPalette;
