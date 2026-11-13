@@ -14,7 +14,7 @@ public:
 
     HardwareInventory inventory() const;
     Snapshot sample();
-    HardwareDetails details(DetailPane pane);
+    HardwareDetails details(DetailPane pane, bool keepAlive = false);
 
 private:
     struct Impl;

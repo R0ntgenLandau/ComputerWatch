@@ -2081,7 +2081,7 @@ private:
 
         rounded(dc, {pad, px(384), area.right - pad, px(McpCardBottom)}, px(22), theme_->surface, theme_->border);
         label(dc, boldFont_, L"MCP 客户端接入", {pad + px(14), px(393), area.right - pad, px(421)});
-        label(dc, smallFont_, L"通过本机 stdio 只读查询已保存的采样和进程排行。客户端需要 uv。",
+        label(dc, smallFont_, L"通过本机 stdio 查询采样、硬件详情与流量，支持按需刷新。需要 uv。",
             {pad + px(14), px(420), area.right - pad - px(14), px(444)}, theme_->secondary);
         label(dc, smallFont_, mcpMessage_,
             {pad + px(158), px(451), area.right - pad - px(14), px(481)}, theme_->blue);

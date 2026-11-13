@@ -1217,19 +1217,19 @@ struct Telemetry::Impl {
         return snapshot;
     }
 
-    HardwareDetails details(DetailPane pane) {
+    HardwareDetails details(DetailPane pane, bool keepAlive) {
         HardwareDetails result;
         result.pane = pane;
         if (pane == DetailPane::Cpu) {
             if (!coreDetails)
                 coreDetails = std::make_unique<CoreDetails>();
             coreDetails->sample(result);
-        } else {
+        } else if (!keepAlive) {
             coreDetails.reset();
         }
         if (pane == DetailPane::Gpu)
             gpu.details(result);
-        else
+        else if (!keepAlive)
             gpu.stopDetails();
         if (pane == DetailPane::Network)
             result.network = readNetworkDetails();
@@ -1408,7 +1408,7 @@ Telemetry::Telemetry() : impl_(std::make_unique<Impl>()) {}
 Telemetry::~Telemetry() = default;
 Snapshot Telemetry::sample() { return impl_->sample(); }
 HardwareInventory Telemetry::inventory() const { return impl_->inventory(); }
-HardwareDetails Telemetry::details(DetailPane pane) { return impl_->details(pane); }
+HardwareDetails Telemetry::details(DetailPane pane, bool keepAlive) { return impl_->details(pane, keepAlive); }
 
 CpuSensors::CpuSensors() : impl_(std::make_unique<Impl>()) {}
 CpuSensors::~CpuSensors() = default;

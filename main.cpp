@@ -5,6 +5,7 @@
 #include "telemetry.h"
 #include "ui.h"
 #include "traffic.h"
+#include "mcp_export.h"
 
 #include <windows.h>
 #include <sddl.h>
@@ -476,16 +477,30 @@ private:
         std::map<std::wstring, std::uint64_t> previousTraffic;
         std::int64_t previousTrafficTime=0, previousSession=0;
         auto nextTrafficSave=steady_clock::now();
+        DashboardExport dashboard;
+        auto mcpUntil=steady_clock::time_point{};
+        unsigned mcpPasses=0;
+        bool mcpDiskReady=false, mcpMemoryReady=false;
+        constexpr std::array mcpPanes{DetailPane::Cpu,DetailPane::Gpu,DetailPane::Memory,DetailPane::Disk,DetailPane::Network};
 
         while (!stop.stop_requested()) {
             const auto started = steady_clock::now();
+            const bool mcpRequested=mcpRequest_ && WaitForSingleObject(mcpRequest_.get(),0)==WAIT_OBJECT_0;
+            if(mcpStartTraffic_ && WaitForSingleObject(mcpStartTraffic_.get(),0)==WAIT_OBJECT_0) sensors_.enableTraffic();
+            if(mcpRequested){
+                mcpUntil=started+12s; mcpPasses=0;
+                mcpDiskReady=dashboard.detailTimes[3] && timeMs()-dashboard.detailTimes[3]<60000;
+                mcpMemoryReady=memoryTimings_ && memoryTimings_->sampledAtMs && timeMs()-memoryTimings_->sampledAtMs<60000;
+                dashboard.displays=activeDisplays();
+            }
+            const bool mcpActive=mcpUntil!=steady_clock::time_point{};
             DetailPane detailPane;
             bool readInventory;
             std::uint64_t revision;
             {
                 std::scoped_lock lock(mutex_);
                 detailPane = visible_ ? detailPane_ : DetailPane::None;
-                readInventory = visible_ && !inventory_;
+                readInventory = (visible_ || mcpActive) && !inventory_;
                 revision = modeRevision_;
             }
             if (readInventory) {
@@ -497,12 +512,12 @@ private:
             sample.timestampMs = timeMs();
             if (detailPane == DetailPane::Network) sensors_.enableTraffic();
             sensors_.update(sample);
-            auto details = telemetry.details(detailPane);
+            auto details = telemetry.details(detailPane, mcpActive);
             const auto& traffic=sensors_.traffic;
             if (started>=nextTrafficSave && traffic.started && traffic.status==0) {
                 if(history.saveTraffic(traffic,sample.timestampMs)) nextTrafficSave=started+5s;
             }
-            if (detailPane == DetailPane::Network) {
+            if (detailPane == DetailPane::Network || mcpActive) {
                 auto& report=details.traffic;
                 report.started=traffic.started; report.status=traffic.status; report.lost=traffic.lost;
                 if(previousSession!=traffic.started){previousTraffic.clear();previousTrafficTime=0;previousSession=traffic.started;}
@@ -523,15 +538,34 @@ private:
                 report.week=history.trafficTotals(sample.timestampMs-7*DayMs);
             } else {previousTrafficTime=0;}
 
-            if (detailPane == DetailPane::Memory) {
-                if (auto memory = sensors_.pollMemory()) memoryTimings_ = std::move(memory);
+            if (detailPane == DetailPane::Memory || mcpActive) {
+                if (auto memory = sensors_.pollMemory()) {
+                    memoryTimings_ = std::move(memory);
+                    mcpMemoryReady=true;
+                }
                 details.memoryTimings = memoryTimings_;
             }
             std::optional<std::vector<DiskDetail>> disks;
-            if (detailPane == DetailPane::Disk) {
+            if (detailPane == DetailPane::Disk || mcpActive) {
                 disks = sensors_.pollDisks();
+                if(disks) {
+                    dashboard.details[3].pane=DetailPane::Disk;
+                    dashboard.details[3].disks=*disks;
+                    dashboard.detailTimes[3]=sample.timestampMs;
+                    mcpDiskReady=true;
+                }
             } else {
                 sensors_.leaveDiskView();
+            }
+            if(mcpActive){
+                for(size_t i=0;i<mcpPanes.size();++i){
+                    if(i==3) continue;
+                    dashboard.details[i]=detailPane==mcpPanes[i]?details:telemetry.details(mcpPanes[i],true);
+                    dashboard.detailTimes[i]=sample.timestampMs;
+                }
+                dashboard.details[2].memoryTimings=memoryTimings_;
+                dashboard.details[4].traffic=details.traffic;
+                ++mcpPasses;
             }
             {
                 std::scoped_lock lock(mutex_);
@@ -566,6 +600,19 @@ private:
                 }
             }
 
+            if(mcpActive){
+                dashboard.generatedAt=timeMs();
+                dashboard.pending=started<mcpUntil && (!mcpDiskReady || !mcpMemoryReady || mcpPasses<2);
+                dashboard.retention=history.retentionDays();dashboard.dark=readDarkMode();
+                {
+                    std::scoped_lock lock(mutex_);
+                    if(inventory_) dashboard.inventory=*inventory_;
+                    dashboard.live.assign(recent_.begin(),recent_.end());
+                }
+                const bool exported=writeDashboardExport(path_.parent_path()/L"dashboard.json",dashboard);
+                // A failed cache write must not keep expanded collection alive indefinitely.
+                if(!dashboard.pending && (exported || started>=mcpUntil+5s)) mcpUntil={};
+            }
             std::unique_lock lock(mutex_);
             const bool visible = visible_;
             auto deadline = started + (visible ? 1s : 5s);
@@ -576,6 +623,8 @@ private:
 
     std::filesystem::path path_;
     SensorClient sensors_;
+    Handle mcpRequest_{CreateEventW(nullptr,FALSE,FALSE,L"Local\\ComputerWatch.Mcp.Refresh.1")};
+    Handle mcpStartTraffic_{CreateEventW(nullptr,FALSE,FALSE,L"Local\\ComputerWatch.Mcp.StartTraffic.1")};
     std::mutex mutex_;
     std::condition_variable_any wake_;
     bool visible_;
