@@ -56,6 +56,14 @@ foreach ($name in $taskNames) {
         throw "A different application or user owns task '$name'."
     }
     if ($task.State -eq 'Running') {
+        # Stop only ETW sessions belonging to this verified installation's sensor helper.
+        if ($name -eq $sensorTask) {
+            Get-CimInstance Win32_Process -Filter "Name = 'ComputerWatch.exe'" |
+                Where-Object { $_.ExecutablePath -eq $executable -and $_.CommandLine -match '--cpu-sensors' } |
+                ForEach-Object {
+                    & "$env:SystemRoot/System32/logman.exe" stop "ComputerWatch.Network.$($_.ProcessId)" -ets 2>$null | Out-Null
+                }
+        }
         Stop-ScheduledTask -InputObject $task
     }
     if ($Uninstall) {

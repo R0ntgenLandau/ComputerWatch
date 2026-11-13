@@ -1,6 +1,7 @@
 #pragma once
 
 #include "common.h"
+#include "traffic.h"
 
 #include <filesystem>
 #include <memory>
@@ -17,6 +18,8 @@ public:
     History& operator=(History&&) noexcept;
 
     bool ready() const;
+    bool saveTraffic(const TrafficPage&, std::int64_t now);
+    std::vector<TrafficTotal> trafficTotals(std::int64_t from) const;
     bool save(const Snapshot& snapshot);
     int retentionDays() const;
     bool setRetentionDays(int days);

@@ -4,6 +4,7 @@
 #include "memory_timings.h"
 #include "telemetry.h"
 #include "ui.h"
+#include "traffic.h"
 
 #include <windows.h>
 #include <sddl.h>
@@ -18,6 +19,8 @@
 #include <deque>
 #include <filesystem>
 #include <memory>
+#include <map>
+#include <ctime>
 #include <mutex>
 #include <string_view>
 #include <thread>
@@ -73,7 +76,7 @@ private:
 };
 
 std::wstring channelName(DWORD pid, const wchar_t* part) {
-    return L"Local\\ComputerWatch.Sensors.4." + std::to_wstring(pid) + L"." + part;
+    return L"Local\\ComputerWatch.Sensors.5." + std::to_wstring(pid) + L"." + part;
 }
 
 std::wstring executablePath() {
@@ -137,6 +140,7 @@ struct SharedDisk {
 };
 
 struct SensorPage {
+    TrafficPage traffic;
     CpuWord cpu;
     CpuWord helperStamp;
     std::size_t diskCount;
@@ -181,17 +185,26 @@ public:
 
     ~SensorClient() { if (view_) UnmapViewOfFile(view_); }
 
+    TrafficPage traffic;
+    void enableTraffic() { if (trafficEnable_) SetEvent(trafficEnable_.get()); }
     void update(Snapshot& snapshot) {
-        if (!request_ || !response_ || !connect()) return;
+        if (!request_ || !response_ || !connect()) { traffic.status=ERROR_NOT_READY; return; }
 
         ResetEvent(response_.get());
         SetEvent(request_.get());
         if (WaitForSingleObject(response_.get(), 80) == WAIT_OBJECT_0) {
             const auto values = std::bit_cast<std::array<float, 2>>(
                 std::atomic_ref<CpuWord>(view_->cpu).load(std::memory_order_acquire));
+            const DWORD trafficLock=trafficMutex_?WaitForSingleObject(trafficMutex_.get(),0):WAIT_FAILED;
+            if(trafficLock==WAIT_OBJECT_0 || trafficLock==WAIT_ABANDONED) {
+                if(trafficLock==WAIT_OBJECT_0) traffic = view_->traffic;
+                else traffic.status=ERROR_INVALID_DATA;
+                ReleaseMutex(trafficMutex_.get());
+            }
             snapshot[Metric::CpuTemp] = values[0];
             snapshot[Metric::CpuWatts] = values[1];
         } else {
+            traffic.status=ERROR_TIMEOUT;
             UnmapViewOfFile(view_);
             view_ = nullptr;
         }
@@ -283,6 +296,8 @@ private:
     }
 
     const DWORD pid_ = GetCurrentProcessId();
+    Handle trafficMutex_{CreateMutexW(nullptr,FALSE,channelName(pid_,L"traffic-mutex").c_str())};
+    Handle trafficEnable_{CreateEventW(nullptr, TRUE, FALSE, channelName(pid_, L"traffic-enable").c_str())};
     Handle request_;
     Handle response_;
     Handle diskRequest_;
@@ -325,6 +340,9 @@ int runCpuHelper() {
             MapViewOfFile(mapping.get(), FILE_MAP_WRITE, 0, 0, sizeof(SensorPage)));
         if (!view) return 1;
 
+        Handle trafficEnable(OpenEventW(SYNCHRONIZE, FALSE, channelName(pid, L"traffic-enable").c_str()));
+        Handle trafficMutex(OpenMutexW(SYNCHRONIZE|MUTEX_MODIFY_STATE,FALSE,channelName(pid,L"traffic-mutex").c_str()));
+        TrafficCapture traffic;
         CpuSensors sensors;
         const auto stamp = (static_cast<CpuWord>(GetCurrentProcessId()) << 32) | GetTickCount();
         std::atomic_ref<CpuWord>(view->helperStamp).store(stamp, std::memory_order_release);
@@ -364,6 +382,11 @@ int runCpuHelper() {
         });
         const HANDLE waits[] = {process.get(), request.get()};
         while (WaitForMultipleObjects(2, waits, FALSE, INFINITE) == WAIT_OBJECT_0 + 1) {
+            if (trafficEnable && WaitForSingleObject(trafficEnable.get(), 0) == WAIT_OBJECT_0) traffic.start();
+            const DWORD trafficLock=trafficMutex?WaitForSingleObject(trafficMutex.get(),0):WAIT_FAILED;
+            if(trafficLock==WAIT_OBJECT_0 || trafficLock==WAIT_ABANDONED) {
+                traffic.snapshot(view->traffic); ReleaseMutex(trafficMutex.get());
+            }
             const auto [temperature, power] = sensors.sample();
             const std::array values{static_cast<float>(temperature), static_cast<float>(power)};
             std::atomic_ref<CpuWord>(view->cpu).store(std::bit_cast<CpuWord>(values), std::memory_order_release);
@@ -450,6 +473,9 @@ private:
         auto nextSave = steady_clock::now();
         auto nextPrune = steady_clock::now();
         int lastRetention = 0;
+        std::map<std::wstring, std::uint64_t> previousTraffic;
+        std::int64_t previousTrafficTime=0, previousSession=0;
+        auto nextTrafficSave=steady_clock::now();
 
         while (!stop.stop_requested()) {
             const auto started = steady_clock::now();
@@ -469,8 +495,34 @@ private:
             }
             auto sample = telemetry.sample();
             sample.timestampMs = timeMs();
+            if (detailPane == DetailPane::Network) sensors_.enableTraffic();
             sensors_.update(sample);
             auto details = telemetry.details(detailPane);
+            const auto& traffic=sensors_.traffic;
+            if (started>=nextTrafficSave && traffic.started && traffic.status==0) {
+                if(history.saveTraffic(traffic,sample.timestampMs)) nextTrafficSave=started+5s;
+            }
+            if (detailPane == DetailPane::Network) {
+                auto& report=details.traffic;
+                report.started=traffic.started; report.status=traffic.status; report.lost=traffic.lost;
+                if(previousSession!=traffic.started){previousTraffic.clear();previousTrafficTime=0;previousSession=traffic.started;}
+                for(unsigned i=0;i<std::min<unsigned>(traffic.count,traffic.rows.size());++i){
+                    const auto& r=traffic.rows[i]; auto total=r.internet+r.lan+r.other;
+                    double rate=Missing;
+                    auto old=previousTraffic.find(r.path);
+                    if(previousTrafficTime && old!=previousTraffic.end() && total>=old->second && sample.timestampMs>previousTrafficTime)
+                        rate=(total-old->second)*1000.0/(sample.timestampMs-previousTrafficTime);
+                    report.session.push_back({r.path,r.internet,r.lan,r.other,rate});
+                    previousTraffic[r.path]=total;
+                }
+                previousTrafficTime=sample.timestampMs;
+                std::sort(report.session.begin(),report.session.end(),[](const auto& a,const auto& b){return a.internet>b.internet;});
+                std::time_t t=sample.timestampMs/1000; std::tm local{}; localtime_s(&local,&t);
+                local.tm_hour=local.tm_min=local.tm_sec=0; local.tm_isdst=-1;
+                report.today=history.trafficTotals(static_cast<std::int64_t>(std::mktime(&local))*1000);
+                report.week=history.trafficTotals(sample.timestampMs-7*DayMs);
+            } else {previousTrafficTime=0;}
+
             if (detailPane == DetailPane::Memory) {
                 if (auto memory = sensors_.pollMemory()) memoryTimings_ = std::move(memory);
                 details.memoryTimings = memoryTimings_;

@@ -123,6 +123,17 @@ struct HardwareInventory {
     double installedMemory = Missing;
 };
 
+struct TrafficTotal {
+    std::wstring path;
+    std::uint64_t internet{}, lan{}, other{};
+    double rate{};
+};
+struct TrafficReport {
+    std::int64_t started{};
+    unsigned status = 21, lost{};
+    std::vector<TrafficTotal> session, today, week;
+};
+
 struct NetworkConnection {
     std::wstring name, description, macAddress;
     bool physical{};
@@ -138,6 +149,7 @@ struct NetworkDetails {
 };
 
 struct HardwareDetails {
+    TrafficReport traffic;
     DetailPane pane = DetailPane::None;
     std::vector<CoreDetail> cores;
     std::vector<DiskDetail> disks;

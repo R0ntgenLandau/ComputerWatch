@@ -744,6 +744,7 @@ private:
             for (const auto& connection : details_.network->connections)
                 bottom += networkCardHeight(connection) + ModuleGap;
         }
+        bottom += 300 + static_cast<int>(details_.traffic.session.size()+details_.traffic.today.size()+details_.traffic.week.size())*28;
         return std::max(390, bottom + PageInset - ModuleGap);
     }
 
@@ -2160,6 +2161,32 @@ private:
             }
             top += height + ModuleGap;
         }
+        const auto& traffic=details_.traffic;
+        label(dc,boldFont_,L"出站流量 · 按程序汇总（公网发送量降序）",{left,px(top),right,px(top+28)}); top+=30;
+        std::wstring status=traffic.status ? L"采集未就绪，错误码："+std::to_wstring(traffic.status) : L"采集中 · 首次进入本页后持续记录，退出程序停止";
+        if(traffic.started) status+=L" · 开始于 "+timeText(traffic.started,true);
+        if(traffic.lost) status+=L" · 存在丢失事件，统计不完整";
+        label(dc,smallFont_,status,{left,px(top),right,px(top+24)},theme_->muted); top+=24;
+        label(dc,smallFont_,L"TCP/UDP 发送事件字节；局域网按私网/链路本地地址判定；其他含回环/组播/保留地址",{left,px(top),right,px(top+24)},theme_->muted); top+=24;
+        const auto table=[&](const wchar_t* title,const std::vector<TrafficTotal>& rows,bool live){
+            label(dc,boldFont_,title,{left,px(top),right,px(top+28)});
+            const int width=right-left, nameRight=left+width*40/100;
+            const int col=(right-nameRight)/4;
+            const wchar_t* titles[]={L"公网发送",L"局域网发送",L"其他发送",L"上传速度"};
+            for(int i=0;i<4;++i) label(dc,smallFont_,titles[i],{nameRight+i*col,px(top),nameRight+(i+1)*col,px(top+28)},theme_->secondary,DT_RIGHT);
+            top+=28;
+            if(rows.empty()){label(dc,smallFont_,L"暂无已记录流量",{left,px(top),right,px(top+28)},theme_->muted);top+=28;}
+            for(const auto& r:rows){
+                auto name=r.path.substr(r.path.find_last_of(L"\\")+1);
+                label(dc,normalFont_,name,{left,px(top),nameRight-px(12),px(top+28)});
+                const std::wstring cells[]={bytes(static_cast<double>(r.internet),false),bytes(static_cast<double>(r.lan),false),bytes(static_cast<double>(r.other),false),live?bytes(r.rate,true):L"—"};
+                for(int i=0;i<4;++i) label(dc,normalFont_,cells[i],{nameRight+i*col,px(top),nameRight+(i+1)*col,px(top+28)},theme_->ink,DT_RIGHT);
+                top+=28;
+            }
+        };
+        table(L"本次采集",traffic.session,true);
+        table(L"今天",traffic.today,false);
+        table(L"最近 7 天",traffic.week,false);
     }
 
     void paintCpuDetails(HDC dc, RECT area, const Snapshot* snapshot) const {

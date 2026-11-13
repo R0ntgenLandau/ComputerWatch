@@ -131,6 +131,8 @@ public:
                                      : api_.bindNull(handle_, index)) == SqlOk;
     }
 
+    bool text(int index, const std::wstring& value) const { return api_.bindText(handle_, index, value.data(), static_cast<int>(value.size()*sizeof(wchar_t)), reinterpret_cast<Destructor>(-1))==SqlOk; }
+    std::wstring text(int column) const { auto* p=static_cast<const wchar_t*>(api_.columnText(handle_,column)); return p?std::wstring(p):L""; }
     bool bindName(int index, const ProcessEntry& entry) const {
         const auto length = std::find(std::begin(entry.name), std::end(entry.name), L'\0') - entry.name;
         const auto transient = reinterpret_cast<Destructor>(-1);
@@ -180,6 +182,9 @@ bool createSchema(const Database& db) {
             pid INTEGER NOT NULL, name TEXT NOT NULL, cpu REAL, memory INTEGER NOT NULL,
             PRIMARY KEY(timestamp_ms, sort_kind, place)
         ) WITHOUT ROWID;
+        CREATE TABLE IF NOT EXISTS traffic_cursor(session INTEGER, path TEXT, public INTEGER, lan INTEGER, other INTEGER, updated INTEGER, PRIMARY KEY(session,path));
+        CREATE TABLE IF NOT EXISTS traffic_bytes(time INTEGER, path TEXT, public INTEGER, lan INTEGER, other INTEGER);
+        CREATE INDEX IF NOT EXISTS traffic_time ON traffic_bytes(time);
         CREATE TABLE IF NOT EXISTS settings(
             id INTEGER PRIMARY KEY CHECK(id = 1),
             retention_days INTEGER NOT NULL CHECK(retention_days BETWEEN 1 AND 3650)
@@ -300,6 +305,8 @@ bool History::prune(std::int64_t cutoffMs, bool& more) {
     )sql");
     if (!prune || !prune.bindInteger(1, cutoffMs) || prune.step() != SqlDone) return false;
     more = impl_->db.api.changes(impl_->db.handle) == 4096;
+    Statement trafficPrune(impl_->db,"DELETE FROM traffic_bytes WHERE time<?");
+    if(!trafficPrune.bindInteger(1,cutoffMs) || trafficPrune.step()!=SqlDone) return false;
     return true;
 }
 
@@ -357,3 +364,45 @@ std::optional<Snapshot> History::at(std::int64_t timestampMs) const {
 }
 
 } // namespace cw
+
+namespace cw {
+bool History::saveTraffic(const TrafficPage& page, std::int64_t now) {
+    if(!ready() || page.status || !page.started) return false;
+    auto& db=impl_->db;
+    if(!db.exec("BEGIN IMMEDIATE")) return false;
+    bool ok=true;
+    Statement previous(db,"SELECT public,lan,other FROM traffic_cursor WHERE session=? AND path=?");
+    Statement cursor(db,"INSERT OR REPLACE INTO traffic_cursor VALUES(?,?,?,?,?,?)");
+    Statement insert(db,"INSERT INTO traffic_bytes VALUES(?,?,?,?,?)");
+    for(unsigned i=0;ok && i<std::min<unsigned>(page.count,page.rows.size());++i) {
+        const auto& r=page.rows[i]; std::wstring path(r.path);
+        previous.bindInteger(1,page.started); previous.text(2,path);
+        std::int64_t a=0,b=0,c=0;
+        if(previous.step()==SqlRow){a=previous.integer(0);b=previous.integer(1);c=previous.integer(2);}
+        previous.reset();
+        auto da=static_cast<std::int64_t>(r.internet)-a, dbb=static_cast<std::int64_t>(r.lan)-b, dc=static_cast<std::int64_t>(r.other)-c;
+        if(da<0 || dbb<0 || dc<0){ok=false;break;}
+        if(!da && !dbb && !dc) continue;
+        ok=insert.bindInteger(1,now) && insert.text(2,path) && insert.bindInteger(3,da) && insert.bindInteger(4,dbb) && insert.bindInteger(5,dc) && insert.step()==SqlDone;
+        insert.reset();
+        ok=ok && cursor.bindInteger(1,page.started) && cursor.text(2,path) && cursor.bindInteger(3,r.internet) && cursor.bindInteger(4,r.lan) && cursor.bindInteger(5,r.other) && cursor.bindInteger(6,now) && cursor.step()==SqlDone;
+        cursor.reset();
+    }
+    // Keep active session cursors even when older traffic expires, avoiding recounts.
+    Statement prune(db,"DELETE FROM traffic_bytes WHERE time<?");
+    prune.bindInteger(1,now-static_cast<std::int64_t>(retentionDays())*86400000);
+    ok=ok && prune.step()==SqlDone;
+    Statement pruneCursor(db,"DELETE FROM traffic_cursor WHERE updated<? AND session<>?");
+    pruneCursor.bindInteger(1,now-static_cast<std::int64_t>(retentionDays())*86400000); pruneCursor.bindInteger(2,page.started);
+    ok=ok && pruneCursor.step()==SqlDone;
+    if(ok && db.exec("COMMIT")) return true;
+    db.exec("ROLLBACK"); return false;
+}
+std::vector<TrafficTotal> History::trafficTotals(std::int64_t from) const {
+    std::vector<TrafficTotal> rows; if(!ready()) return rows;
+    Statement q(impl_->db,"SELECT path,SUM(public),SUM(lan),SUM(other) FROM traffic_bytes WHERE time>=? GROUP BY path ORDER BY SUM(public) DESC,path");
+    q.bindInteger(1,from);
+    while(q.step()==SqlRow) rows.push_back({q.text(0),static_cast<std::uint64_t>(q.integer(1)),static_cast<std::uint64_t>(q.integer(2)),static_cast<std::uint64_t>(q.integer(3)),0});
+    return rows;
+}
+}
